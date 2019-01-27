@@ -509,9 +509,20 @@ with open(sys.argv[1]) as infile, open(outfilename, 'wb') as outfile:
 
         current_position += 1
 
-    print("Linking...")
+    print("Linking (sorta)...")
 
     for jump in jump_list:
         location, jtype, label = jump
+        try:
+            jump_loc = label_table[label]
+            if jtype == 'j':
+                ba[location*2:location*2+2] = bytes([ 0xc0 | ((jump_loc >> 8) & 0x1f), (jump_loc >> 1) & 0xff ])
+            elif jtype == 'call':
+                ba[location*2:location*2+2] = bytes([ 0xe0 | ((jump_loc >> 8) & 0x1f), (jump_loc >> 1) & 0xff ])
+                print([ "%x" % n for n in list(ba[location*2:location*2+2]) ])
+            else:
+                print("jump type %s not implemented yet" % jtype)
+        except KeyError:
+            print("Unknown label %s" % label)
 
     outfile.write(ba)
