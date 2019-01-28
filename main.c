@@ -7,45 +7,81 @@
 #define RUN_FLAG 1
 #define CRASH_FLAG 2
 #define JUMP_FLAG 4
+#define CARRY_FLAG 8
+#define ZERO_FLAG 16
 
-/* Flag register flag constants */
-#define CARRY_FLAG 1
-#define ZERO_FLAG 2
+typedef uint32_t u32;
+
+typedef int32_t i32;
 
 typedef uint16_t u16;
+
+typedef int16_t i16;
 
 typedef uint8_t u8;
 
 sfRenderWindow *window;
 
-char rom_title[61];
+char rom_title[15];
+
+// uh, this can be arbitrarily big I guess
+// I'll probably heap-allocate this? But I've
+// gone so far without heap allocation!
+// Maybe when switching banks it should read
+// the appropriate block from disk?
+unsigned char rom_buffer[65536];
 
 // Here's our machine!
 typedef struct interp {
-    // general use registers
+    // 14 general use registers
     u16 a;
     u16 b;
     u16 c;
     u16 d;
+
     u16 e;
+    u16 f;
+    u16 g;
+    u16 h;
+
+    u16 i;
+    u16 j;
+    u16 k;
+    u16 l;
+
+    u16 m;
+    u16 n;
 
     // stack pointer register
-    u16 s;
+    u16 sp;
 
     // program counter
-    u16 p;
-
-    // flag register
-    // 16 is definitely way too many flags :/
-    // Maybe we'll split this into like an 8-bit
-    // flag register and an 8-bit normal register
-    u16 f;
+    u16 pc;
 
     // interpreter flags
     u8 flags;
 
-    // 128k of sweet sweet mem
-    u8 mem[131072];
+    // bank IDs (for accessing more RAM/ROM)
+    // we always get the bottom 8k of RAM at
+    // $8000 - $9FFF, and any other 8k of RAM
+    // at $a000 - $bfff. we can swap banks by
+    // writing to some specific memory address
+    // that I haven't figured out yet
+    u8 ram_bank;
+    // similarly, we always get the bottom 16k
+    // of ROM at $0000 - $3fff, and any other
+    // 16k of ROM at $4000 - $7fff.
+    u8 rom_bank;
+    // then, the top 16k of address space is
+    // mapped to hardware registers, video ram,
+    // sound ram, etc. haven't quite worked
+    // this all out yet
+
+    // pointer to ROM data
+    u8 *rom;
+
+    // 64k of sweet sweet mem
+    u8 mem[65536];
 } interp;
 
 void do_instr(interp *I);
@@ -60,25 +96,23 @@ void insert_string(u8 *mem, u16 offset, int length, char *str) {
 
 u16 *get_reg(interp *I, char reg_id) {
     // given register id (0-7), return a pointer to the right register
-    // (yeah, 'return a pointer to the register' makes perfect
-    //  sense, shut up :P)
     switch(reg_id) {
-        case 0:
-            return &I->a; break;
-        case 1:
-            return &I->b; break;
-        case 2:
-            return &I->c; break;
-        case 3:
-            return &I->d; break;
-        case 4:
-            return &I->e; break;
-        case 5:
-            return &I->s; break;
-        case 6:
-            return &I->p; break;
-        case 7:
-            return &I->f; break;
+        case 0:  return &I->a;  break;
+        case 1:  return &I->b;  break;
+        case 2:  return &I->c;  break;
+        case 3:  return &I->d;  break;
+        case 4:  return &I->e;  break;
+        case 5:  return &I->f;  break;
+        case 6:  return &I->g;  break;
+        case 7:  return &I->h;  break;
+        case 8:  return &I->i;  break;
+        case 9:  return &I->j;  break;
+        case 10: return &I->k;  break;
+        case 11: return &I->l;  break;
+        case 12: return &I->m;  break;
+        case 13: return &I->n;  break;
+        case 14: return &I->sp; break;
+        case 15: return &I->pc; break;
         default:
             fprintf(stderr, "internal error: invalid reg id %d\n", reg_id);
             return 0;
@@ -102,6 +136,82 @@ u16 srl(u16 val, int amt) {
     return val;
 }
 
+void store_byte(interp *I, u16 addr, u8 value) {
+    // Writing below $8000 does nothing - this is ROM, so
+    // it's read only, obvi
+    if (addr < 0x8000) {
+        fprintf(stderr, "Attempt to write to ROM-mapped location $%04X "
+                "(pc: $%04X)\n", addr, I->pc);
+        return;
+    }
+
+    // 0x8000-0x9fff is always the first 8k of RAM
+    if (addr < 0xa000) {
+        I->mem[addr - 0x8000] = value;
+        return;
+    }
+
+    // writing to 0xa000-0xbfff writes to the current banked chunk of RAM
+    // (there are 8 of these, although #0 is always also mapped to
+    // 0x8000-0x9fff)
+    if (addr < 0xc000) {
+        I->mem[addr - 0xa000 + I->ram_bank * 0x2000] = value;
+        return;
+    }
+
+    printf("Unimplemented writing to thing!\n");
+}
+
+u8 load_byte(interp *I, u16 addr) {
+    // Reading below $4000 returns stuff in first 16k of ROM, always
+    if (addr < 0x4000) {
+        return I->rom[addr];
+    }
+
+    // Reading $4000 - $7fff returns stuff in a different 16k chunk of ROM
+    if (addr < 0x8000) {
+        return I->rom[addr + I->rom_bank * 0x4000];
+    }
+
+    // Reading $8000 - $9fff returns values in first 8k of RAM
+    if (addr < 0xa000) {
+        return I->mem[addr - 0x8000];
+    }
+
+    // Reading $a000 - $bfff returns values in other 8k of RAM
+    if (addr < 0xc000) {
+        return I->mem[addr - 0xa000 + I->ram_bank * 0x2000];
+    }
+
+    printf("Unimplemented reading from thing!\n");
+    return 0;
+}
+
+void store_word(interp *I, u16 addr, u16 value) {
+    if (addr % 2 == 1) {
+        fprintf(stderr, "Unaligned word write to $%04X (pc: $%04X)\n", addr, I->pc);
+        return;
+    }
+
+    u8 hival = srl(value, 8) & 0xff;
+    u8 loval = value & 0xff;
+
+    store_byte(I, addr, hival);
+    store_byte(I, addr + 1, loval);
+}
+
+u16 load_word(interp *I, u16 addr) {
+    if (addr % 2 == 1) {
+        fprintf(stderr, "Unaligned word read at $%04X (pc: $%04X)\n", addr, I->pc);
+        return 0;
+    }
+
+    u8 hival = load_byte(I, addr);
+    u8 loval = load_byte(I, addr+1);
+
+    return ((u16)hival << 8) | loval;
+}
+
 int main (int argc, char **argv) {
     sfVideoMode mode = {192, 144, 32};
     window = sfRenderWindow_create(mode, "vs-16", sfClose, NULL);
@@ -113,12 +223,12 @@ int main (int argc, char **argv) {
     interp I;
     I.flags = RUN_FLAG;
 
-    // program starts at 0x0080, after a 256-byte header
-    I.p = 0x0080;
+    // program starts at 0x0100, after a 256-byte header
+    I.pc = 0x0100;
 
-    // stack starts at 0xcfff (will probably change this once
-    // we decide what the memory layout looks like)
-    I.s = 0xcfff;
+    // stack starts at 0x9ffe so it's always available
+    // and not in a bank that might get swapped out
+    I.sp = 0x9ffe;
 
     if (argc != 2) {
         printf("Please supply a file name.\n");
@@ -127,20 +237,15 @@ int main (int argc, char **argv) {
 
     FILE *rom = fopen(argv[1], "rb");
 
-    size_t size = fread(I.mem, 1, sizeof(I.mem), rom);
+    size_t size = fread(rom_buffer, 1, sizeof(I.mem), rom);
 
     printf("Read %lu bytes from ROM.\n", size);
 
-    strncpy(rom_title, (char*)&I.mem[4], 60);
-    rom_title[60] = '\0';
-    printf("Loaded: %s\n", rom_title);
+    I.rom = rom_buffer;
 
-    /*printf("==== INITIAL RAM STATE ====\n");
-    for (int i = 0; i < 512; i++) {
-        if (i % 32 == 0) printf("%04X  ", i);
-        printf("%02x ", I.mem[i]);
-        if (i % 32 == 31) printf("\n");
-    }*/
+    strncpy(rom_title, (char*)&rom_buffer[2], 14);
+    rom_title[14] = '\0';
+    printf("Loaded: %s\n", rom_title);
 
     while (I.flags & RUN_FLAG) {
         do_instr(&I);
@@ -148,27 +253,28 @@ int main (int argc, char **argv) {
 
     printf("==== FINAL STATE ====\n");
     printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
-    printf("     e: %04X s: %04X p: %04X f: %04X\n", I.e, I.s, I.p, I.f);
+    printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
+    printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
+    printf("     m: %04X n: %04X S: %04X P: %04X\n", I.m, I.n, I.sp, I.pc);
 }
 
 void do_instr(interp *I) {
-    // it's big-endian, I guess? why not
-    u16 instr = (I->mem[I->p * 2] << 8) | I->mem[I->p * 2 + 1];
+    u16 instr = load_word(I, I->pc);
 
-    printf("Instruction @ 0x%04X: 0x%04X\n", I->p * 2, instr);
+    // first 4 bits are the opcode
+    u16 instrtype = srl(instr, 12) & 0xf;
 
-    // first 5 bits are the opcode
-    u16 instrtype = (instr >> 11) & 0x1f;
+    printf("Instruction @ 0x%04X: 0x%04X\n", I->pc, instr);
 
     int ok = 0;
 
-    // reset jump flag
-    I->flags &= ~JUMP_FLAG;
+    // how much to increment pc by after performing instruction
+    u8 pc_increment = 2;
 
-    if (instrtype == 0) {
-        // type 0: miscellaneous
-        // get the 11 remaining bits
-        u16 subcode = (instr >> 8) & 7;
+    if (instrtype == 0x0) {
+        // 0000: miscellaneous
+        // get the 12 remaining bits
+        u16 subcode = srl(instr, 8) & 0xf;
         u16 rest = instr & 0xff;
         if (subcode == 0) {
             // code 0 = 'special' instructions
@@ -183,463 +289,316 @@ void do_instr(interp *I) {
             } else if (rest == 0xaa) {
                 // 0x00aa = RETURN
                 // pops return address off stack and jumps to it
-                u16 retaddr = (I->mem[I->s * 2 + 2] << 8) | (I->mem[I->s * 2 + 3]);
-                I->s ++;
-                I->p = retaddr;
-                I->flags |= JUMP_FLAG;
+                u16 retaddr = load_word(I, I->sp);
+                I->sp += 2;
+                I->pc = retaddr;
+                // don't increase pc
+                pc_increment = 0;
                 ok = 1;
             }
         } else if (subcode == 1) {
             // PUSH
-            //      00000 001 xxx-----
-            // xxx = register to push
-            u8 reg_idx = srl(rest, 5);
+            //      0000 0001 xxxx ----
+            // xxxx = register to push
+            I->sp -= 2;
+            u8 reg_idx = srl(rest, 4);
             u16 *push_reg = get_reg(I, reg_idx);
-            I->mem[I->s * 2] = srl(*push_reg, 8);
-            I->mem[I->s * 2 + 1] = *push_reg & 0x00ff;
-            I->s --;
+            store_word(I, I->sp, *push_reg);
             ok = 1;
         } else if (subcode == 2) {
             // POP
-            //      00000 010 xxx-----
-            // xxx = register to push
-            u8 reg_idx = srl(rest, 5);
-            u16 *push_reg = get_reg(I, reg_idx);
-            *push_reg = (I->mem[I->s * 2 + 2] << 8) | (I->mem[I->s * 2 + 3]);
-            I->s ++;
+            //      0000 0010 xxxx ----
+            // xxxx = register to pop into
+            u8 reg_idx = srl(rest, 4);
+            u16 *pop_reg = get_reg(I, reg_idx);
+            *pop_reg = load_word(I, I->sp);
+            I->sp += 2;
             ok = 1;
         } else if (subcode == 3) {
             // Jump to register
-            //      00000 011 xxx-----
+            //      0000 0011 xxxx ----
             // xxx = register containing address to jump to
-            u8 reg_idx = srl(rest, 5);
+            u8 reg_idx = srl(rest, 4);
             u16 *jump_reg = get_reg(I, reg_idx);
-            I->p = *jump_reg;
-            I->flags |= JUMP_FLAG;
+            I->pc = *jump_reg;
+            // don't increment pc
+            pc_increment = 0;
             ok = 1;
         }
-    } else if ((instrtype & ~7) == 8) {
-        // code 01xxx = immediate instrs
-        // (~7 masks out the three bottom bits)
-        // next 3 bits are the register to operate on
-        // and the following 8 bytes are the immediate value
-
-        // reset flags for MATH!!
-        I->f &= ~CARRY_FLAG;
-        I->f &= ~ZERO_FLAG;
-
-        // break up the bits
-        u8 op = instrtype & 7;
-        u8 reg = (instr >> 8) & 7;
-        u8 val = (instr & 0xff);
-
-        // find which register we're looking at
-        u16 *load_reg = get_reg(I, reg);
-        if (op == 0) {
-            // 01000 = load immediate
-            *load_reg = val;
-            ok = 1;
-        } else if (op == 1) {
-            // 01001 = add immediate
-            // set carry flag if overflow
-            if ((int)*load_reg + val > 0xFFFF) {
-                I->f |= CARRY_FLAG;
-            }
-            *load_reg += val;
-            ok = 1;
-        } else if (op == 2) {
-            // 01010 = multiply immediate
-            // set carry flag if overflow
-            if ((int)*load_reg * val > 0xFFFF) {
-                I->f |= CARRY_FLAG;
-            }
-            *load_reg *= val;
-            ok = 1;
-        } else if (op == 3) {
-            // 01011 = subtract immediate
-            // set carry flag if UNDERflow
-            if ((int)*load_reg - val < 0) {
-                I->f |= CARRY_FLAG;
-            }
-            *load_reg -= val;
-            ok = 1;
-        } else if (op == 4) {
-            // 01100 = bitwise and immediate
-            *load_reg &= val;
-            ok = 1;
-        } else if (op == 5) {
-            // 01101 = bitwise or immediate
-            *load_reg |= val;
-            ok = 1;
-        } else if (op == 6) {
-            // 01110 = bitwise xor immediate
-            *load_reg ^= val;
-            ok = 1;
-        } else if (op == 7) {
-            // 01111 = bit operations immediate
-            u8 optype = val & 0xf0;
-            u8 amount = val & 0x0f;
-            if (optype == 0x80) {
-                // 01111xxx1000yyyy = bitshift left (by yyyy bits)
-                *load_reg <<= amount;
-                ok = 1;
-            } else if (optype == 0x90) {
-                // 01111xxx1001yyyy = logical bitshift right
-                *load_reg = srl(*load_reg, amount);
-                ok = 1;
-            } else if (optype == 0xa0) {
-                // 01111xxx1010yyyy = arithmetic bitshift right
-                *load_reg = sra(*load_reg, amount);
-                ok = 1;
-            } else if (optype == 0xb0) {
-                // 01111xxx1011yyyy = bit rotate left
-                *load_reg = srl(*load_reg, 16 - amount) | (u16)(*load_reg << amount);
-                ok = 1;
-            } else if (optype == 0xc0) {
-                // 01111xxx1100yyyy = bit rotate right
-                *load_reg = (*load_reg << (16 - amount)) | srl(*load_reg, amount);
-                ok = 1;
-            } else if (optype == 0xd0) {
-                // 01111xxx1101yyyy = bit test
-                if (!(*load_reg & (1 << amount))) {
-                    I->f |= ZERO_FLAG;
-                }
-                ok = 1;
-            }
-        }
-
-        if (*load_reg == 0) {
-            I->f |= ZERO_FLAG;
-        }
-    } else if (instrtype == 1) {
-        // 00001 = arithmetic register instructions
+    } else if ((instrtype & 0x8) == 0x8) {
+        // prefix 1 = arithmetic instructions
         //
-        // format: 00001xxxyyyzzzzz
+        // format: 1oooooxx xxyyyyyy
         //
-        // xxx = dest register (like x86, also a source for eg add)
-        // yyy = other src register
-        // zzzzz = arithmetic operation
-        //
-        // dang, I really wish C had binary literals -- they'd make
-        // these bitmasks a lot clearer.
-        // (although it should be p. clear from the format given above
-        // what we're doing here.)
-        u8 op       =  instr & 0x1f;
-        u8 src_idx  = (instr >> 5) & 0x7;
-        u8 dest_idx = (instr >> 8) & 0x7;
+        //  ooooo = arithmetic operation
+        //   xxxx = dest register (like x86, also a source for eg add)
+        // yyyyyy = other src register, or special value
+
+        ok = 1;
+
+        u8 op       = srl(instr, 10) & 0x1f;
+        u8 dest_idx = srl(instr,  6) &  0xf;
+        u8 src_idx  = srl(instr,  0) & 0x3f;
 
         // again, reset MATH FLAGS
-        I->f &= ~CARRY_FLAG;
-        I->f &= ~ZERO_FLAG;
+        I->flags &= ~CARRY_FLAG;
+        I->flags &= ~ZERO_FLAG;
 
         u16 *dest = get_reg(I, dest_idx);
-        u16 *src = get_reg(I, src_idx);
+
+        u16 srcval;
+
+        if (src_idx < 0x10) {
+            // yy yyyy = 00 rrrr, where rrrr is register ID
+            u16 *src = get_reg(I, src_idx & 0xf);
+            srcval = *src;
+        } else if (src_idx < 0x20) {
+            // yy yyyy = 01 vvvv, where vvvv is a small immediate
+            // value from 0-15 (can be used for immediate bitshifts,
+            // bit testing, etc. where we only need these values)
+            srcval = src_idx & 0xf;
+        } else if (src_idx == 0x20) {
+            // yy yyyy = 10 0000
+            // this means there's a 16-bit immediate value following
+            // the instruction; we use this as the second operand
+
+            // Get the immediate value
+            srcval = load_word(I, I->pc + 2);
+            pc_increment += 2;
+        } else {
+            // uh I don't know what 0x2? or 0x3? should be yet
+            // but we've got some room here to expand!
+            fprintf(stderr, "Unknown source operand $%X for "
+                    "arithmetic instruction\n", src_idx);
+            srcval = 0;
+            ok = 0;
+        }
 
         if (op == 0x00) {
-            // Addition!
-            if ((int)*dest + (int)*src > 0xFFFF) I->f |= CARRY_FLAG;
-            *dest += *src;
-            ok = 1;
+            // Move register/load immediate
+            *dest = srcval;
         } else if (op == 0x01) {
-            // Subtraction
-            if ((int)*dest - (int)*src < 0) I->f |= CARRY_FLAG;
-            *dest -= *src;
-            ok = 1;
+            // Addition!
+            if ((int)*dest + (int)srcval > 0xFFFF) I->flags |= CARRY_FLAG;
+            *dest += srcval;
         } else if (op == 0x02) {
-            // Multiplication
-            if ((uint32_t)*dest * (uint32_t)*src > 0xFFFF) I->f |= CARRY_FLAG;
-            *dest -= *src;
-            ok = 1;
+            // Subtraction
+            if ((int)*dest - (int)srcval < 0) I->flags |= CARRY_FLAG;
+            *dest -= srcval;
         } else if (op == 0x03) {
-            // Bitwise AND
-            *dest &= *src;
-            ok = 1;
+            // Unsigned multiplication
+            if ((u32)*dest * (u32)srcval > 0xFFFF) I->flags |= CARRY_FLAG;
+            *dest = (u16)((u32)*dest * (u32)srcval);
         } else if (op == 0x04) {
-            // Bitwise OR
-            *dest |= *src;
-            ok = 1;
+            // Signed multiplication
+
+            // I think this is right? (I hope this is right...)
+            // First convert to signed, then sign-extend. :/
+            i32 sdest = (i32)(i16)*dest;
+            i32 ssrc = (i32)(i16)srcval;
+            if (sdest * ssrc >= 0x8000) I->flags |= CARRY_FLAG;
+            *dest = (u16)(i16)(sdest * ssrc);
+
         } else if (op == 0x05) {
-            // Bitwise XOR
-            *dest ^= *src;
-            ok = 1;
+            // Unsigned division
+            *dest /= srcval;
         } else if (op == 0x06) {
+            // Signed division
+            *dest = ((i16)*dest / (i16)srcval);
+        } else if (op == 0x07) {
+            // Unsigned modulo
+            *dest = ((*dest % srcval) + srcval) % srcval;
+        } else if (op == 0x08) {
+            // Signed modulo
+            // Non-stupid signed modulo, though
+            *dest = (u16)(((i16)*dest % srcval) + srcval) % srcval;
+        } else if (op == 0x09) {
+            // Bitwise AND
+            *dest &= srcval;
+        } else if (op == 0x0a) {
+            // Bitwise OR
+            *dest |= srcval;
+        } else if (op == 0x0b) {
+            // Bitwise XOR
+            *dest ^= srcval;
+        } else if (op == 0x0c) {
             // Bitwise negation (doesn't use src)
             *dest = ~*dest;
-            ok = 1;
-        } else if (op == 0x07) {
+        } else if (op == 0x0d) {
             // Arithmetic negation (doesn't use src)
             *dest = 0xFFFF - *dest + 1;
-            ok = 1;
-        } else if (op == 0x08) {
+        } else if (op == 0x0e) {
             // Increment dest (doesn't use src)
             // (Sets carry flag if the thing wrapped around)
-            if (*dest == 0xFFFF) I->f |= CARRY_FLAG;
+            if (*dest == 0xFFFF) I->flags |= CARRY_FLAG;
             (*dest)++;
-            ok = 1;
-        } else if (op == 0x09) {
+        } else if (op == 0x0f) {
             // Decrement dest (doesn't use src)
             // (Also sets carry flag if the thing wrapped around)
-            if (*dest == 0x0000) I->f |= CARRY_FLAG;
+            if (*dest == 0x0000) I->flags |= CARRY_FLAG;
             (*dest)--;
-            ok = 1;
-        } else if (op == 0x0a) {
+        } else if (op == 0x10) {
             // Logical left shift
             // (Also sets carry flag if the thing wrapped around)
-            if (*dest >= 0x8000) I->f |= CARRY_FLAG;
-            *dest <<= *src;
-            ok = 1;
-        } else if (op == 0x0b) {
+            if (*dest >= 0x8000) I->flags |= CARRY_FLAG;
+            *dest <<= srcval;
+        } else if (op == 0x11) {
             // Logical right shift
-            *dest = srl(*dest, *src);
-            ok = 1;
-        } else if (op == 0x0c) {
+            *dest = srl(*dest, srcval);
+        } else if (op == 0x12) {
             // Arithmetic right shift
-            *dest = sra(*dest, *src);
-            ok = 1;
-        } else if (op == 0x0d) {
-            // Comparison
-            // Basically the same as SUB dest, src - except it
-            // doesn't actually place the result in dest, it
-            // just sets the flags.
-            if (*dest < *src) I->f |= CARRY_FLAG;
-            if (*dest == *src) I->f |= ZERO_FLAG;
-            ok = 1;
-        } else if (op == 0x0e) {
+            *dest = sra(*dest, srcval);
+        } else if (op == 0x13) {
             // Bit rotate left
-            u8 amount = *src & 0xf;
+            u8 amount = srcval & 0xf;
             *dest = srl(*dest, 16 - amount) | (u16)(*dest << amount);
-            ok = 1;
-        } else if (op == 0x0f) {
+        } else if (op == 0x14) {
             // Bit rotate right
-            u8 amount = *src & 0xf;
+            u8 amount = srcval & 0xf;
             *dest = (*dest << (16 - amount)) | srl(*dest, amount);
-            ok = 1;
-        } else if (op == 0x10) {
+        } else if (op == 0x15) {
             // Bit test
-            u8 bit = *src & 0xf;
+            u8 bit = srcval & 0xf;
             if (!(*dest & (1 << bit))) {
-                I->f |= ZERO_FLAG;
+                I->flags |= ZERO_FLAG;
             }
-            ok = 1;
+        /* unused operation space here */
+        } else if (op == 0x1e) {
+            // Unsigned comparison
+            if (*dest < srcval) I->flags |= CARRY_FLAG;
+            if (*dest == srcval) I->flags |= ZERO_FLAG;
+        } else if (op == 0x1f) {
+            // Signed comparison
+            if ((i16)*dest < (i16)srcval) I->flags |= CARRY_FLAG;
+            if (*dest == srcval) I->flags |= ZERO_FLAG;
+        } else {
+            ok = 0;
         }
 
-        if (*dest == 0) {
-            I->f |= ZERO_FLAG;
+        if (*dest == 0 && op < 0x1e) {
+            I->flags |= ZERO_FLAG;
         }
-    } else if (instrtype == 2) {
-        // 00010: Load instructions
-        // The format is similar-ish to the arithmetic instructions above:
-        //      00010xxxyyyzzwww
-        // xxx = value register (loaded into)
-        // yyy = address register (points into memory)
-        //  zz = operation type (load word, load high/low byte)
-        // www = offset, measured in 16-bit words
-        //       (signed, except 100 = +4, not -3)
-        signed offset =  instr &  0x07;
-        u8 op         = (instr &  0x18) >> 3;
-        u8 addr_idx   = (instr &  0xe0) >> 5;
-        u8 dest_idx   = (instr & 0x700) >> 8;
+    } else if ((instrtype & 0xc) == 0x4) {
+        // 01??: Load/store instructions
+        //      01ooxxxx00yyyyyy
+        //     oo = operation type (load/store word/byte)
+        //   xxxx = register to load/store into/from
+        // yyyyyy = register w/ memory location (possibly imm. offset follows)
 
-        if (offset > 4) offset -= 8;
+        ok = 1;
 
-        u16 *addr = get_reg(I, addr_idx);
-        u16 *dest = get_reg(I, dest_idx);
+        u8 op     = srl(instr, 12) &  0x3;
+        u8 reg_id = srl(instr,  8) &  0xf;
+        u8 mem_id = srl(instr,  0) & 0x3f;
+
+        u16 *reg = get_reg(I, reg_id);
+
+        u16 addr;
+        if (mem_id < 0x10) {
+            // yy yyyy = 00 rrrr; address in register rrrr
+            addr = *get_reg(I, mem_id & 0xf);
+        } else if (mem_id < 0x20) {
+            // yy yyyy = 01 rrrr; address in rrrr + imm. offset following
+            addr = *get_reg(I, mem_id & 0xf);
+            addr += load_word(I, I->pc + 2);
+            pc_increment += 2;
+        } else if (mem_id == 0x20) {
+            // yy yyyy = 01 0000; no register, immediate address following
+            addr = load_word(I, I->pc + 2);
+            pc_increment += 2;
+        } else {
+            fprintf(stderr, "Unknown address mode $%X for load/store "
+                    "(pc: $%04X)\n", mem_id, I->pc);
+            addr = 0;
+            ok = 0;
+        }
 
         if (op == 0) {
             // Load word
-            *dest = (I->mem[(*addr + offset) * 2] << 8) | I->mem[(*addr + offset) * 2 + 1];
+            *reg = load_word(I, addr);
         } else if (op == 1) {
-            // Load low byte into low byte of register
-            // (leaves high byte untouched)
-            *dest &= 0xff00;
-            *dest |= I->mem[(*addr + offset) * 2 + 1];
+            // Load byte
+            *reg = load_byte(I, addr);
         } else if (op == 2) {
-            // Load high byte into low byte of register
-            // (leaves high byte untouched)
-            *dest &= 0xff00;
-            *dest |= I->mem[(*addr + offset) * 2 + 1];
-        } else if (op == 3) {
-            // Load high byte into high byte of register
-            // (leaves low byte untouched)
-            *dest &= 0x00ff;
-            *dest |= I->mem[(*addr + offset) * 2 + 1] << 8;
-        }
-        ok = 1;
-    } else if (instrtype == 3) {
-        // 00011: Store instructions
-        // Same as the above format.
-        //      00011xxxyyyzzwww
-        // xxx = value register (stored from)
-        // yyy = address register (points into memory)
-        //  zz = operation type (store word, store high/low byte)
-        // www = offset, measured in 16-bit words
-        //       (signed, except 100 = +4, not -3)
-        signed offset =  instr &  0x07;
-        u8 op         = (instr &  0x18) >> 3;
-        u8 addr_idx   = (instr &  0xe0) >> 5;
-        u8 src_idx    = (instr & 0x700) >> 8;
-
-        if (offset > 4) offset -= 8;
-
-        u16 *addr = get_reg(I, addr_idx);
-        u16 *src  = get_reg(I, src_idx);
-
-        if (op == 0) {
             // Store word
-            I->mem[(*addr + offset) * 2] = srl(*src, 8);
-            I->mem[(*addr + offset) * 2 + 1] = (*src & 0x00ff);
-        } else if (op == 1) {
-            // Store low byte of register into low byte of memory word
-            // (leaves high byte of word untouched)
-            I->mem[(*addr + offset) * 2 + 1] = *src & 0x00ff;
-        } else if (op == 2) {
-            // Store low byte of register into high byte of memory word
-            // (leaves low byte of word untouched)
-            I->mem[(*addr + offset) * 2] = *src & 0x00ff;
+            store_word(I, addr, *reg);
         } else if (op == 3) {
-            // Store high byte of register into low byte of memory word
-            // (leaves high byte of word untouched)
-            I->mem[(*addr + offset) * 2 + 1] = srl(*src, 8);
-            *src &= 0x00ff;
-            *src |= I->mem[(*addr + offset) * 2 + 1] << 8;
+            // Store byte
+            store_byte(I, addr, (*reg) & 0xff);
         }
-        ok = 1;
-    } else if (instrtype == 4) {
-        // 00100: Move instruction(s?)
-        //      00100xxxyyy00zzz
-        // xxx = destination register
-        // yyy = source register
-        // zzz = move operation
-        u8 op = instr & 3;
-        u8 src_idx  = (instr >> 5) & 7;
-        u8 dest_idx = (instr >> 8) & 7;
+    } else if ((instrtype & 0xe) == 0x2) {
+        // 001?: jump
+        //
+        //      001oooaa aaaaaaaa
+        //
+        // ooo = jump type
+        //          0: unconditional
+        //          1: equal (ZF)
+        //          2: not equal (~ZF)
+        //          3: less than (CF)
+        //          4: greater than or equal to (~CF)
+        //          5: less than or equal to (ZF|CF)
+        //          6: greater than (~(ZF|CF))
+        //          7: subroutine (save return address)
+        // a...= jump offset if relative jump
+        //          (measured in words, so we can jump
+        //           +/- 512 words, where instructions
+        //           are either 1 or 2 words)
+        //          (NOTE: if a = 0, uses an immediate
+        //           value following the instruction as
+        //           the address to jump to, rather than
+        //           a relative jump direction)
+        u8  op       = srl(instr, 10) &    0x7;
+        u16 offset   = srl(instr,  0) & 0x03ff;
 
-        u16 *src  = get_reg(I, src_idx);
-        u16 *dest = get_reg(I, dest_idx);
+        u8 should_jump = 0;
 
-        if (op == 0) {
-            // 000: Regular move
-            *dest = *src;
-            ok = 1;
-        } else if (op == 1) {
-            // 001: Move high byte to low byte
-            // (leave high byte of dest unchanged)
-            *dest = (*dest & 0xff00) | (*src & 0xff00);
-            ok = 1;
-        } else if (op == 2) {
-            // 010: Move low byte to high byte
-            // (leave low byte of dest unchanged)
-            *dest = (*src & 0x00ff) | (*dest & 0x00ff);
-            ok = 1;
-        } else if (op == 3) {
-            // 011: Move high byte to high byte
-            // (leave low byte of dest unchanged)
-            *dest = (*src & 0xff00) | (*dest & 0x00ff);
-            ok = 1;
-        } else if (op == 4) {
-            // 100: Move low byte to low byte
-            // (leave high byte of dest unchanged)
-            *dest = (*dest & 0xff00) | (*src & 0x00ff);
-            ok = 1;
-        } else if (op == 5) {
-            // 101: Exchange two registers
-            *dest ^= *src;
-            *src ^= *dest;
-            *dest ^= *src;
-            ok = 1;
-        }
-    } else if (instrtype == 6) {
-        // 00110: Load upper immediate
-        //
-        // This one stores an 8-bit value in the high
-        // byte of a register, and zeroes out the low
-        // byte. You can load an immediate word by
-        // doing a load-upper-immediate, followed by
-        // an or-immediate of the lower byte value.
-        //
-        //      00110xxxIIIIIIII
-        //       xxx = destination register
-        // IIIIIIIII = 8-bit immediate value
-        u8 dest_idx = (instr >> 8) & 7;
-        u8 immediate = (instr & 0xff);
-
-        u16 *dest = get_reg(I, dest_idx);
-
-        *dest = immediate << 8;
-        ok = 1;
-    } else if ((instrtype & 0x1c) == 0x18) {
-        // 110??: unconditional absolute jump
-        //
-        //      110JJJJJ JJJJJJJJ
-        //
-        // JJJ... is a 14-bit address representing
-        // the location to jump to. It's expanded
-        // to a full address because the low bit
-        // is always 0 (long-jump targets have to
-        // be aligned to 4-byte boundaries), and
-        // it uses the high 2 bits of the current PC
-        // for the high bits of the target as well -
-        // to jump out of the current 32K page, use
-        // the register jump instruction.
-        u16 old_p = I->p;
-        u16 new_p = instr & 0x1fff;
-        I->p = (old_p & 0xc000) | (new_p << 1);
-        I->flags |= JUMP_FLAG;
-        ok = 1;
-    } else if ((instrtype & 0x1c) == 0x1c) {
-        // 111??: function call
-        //
-        //      111JJJJJ JJJJJJJJ
-        //
-        // This is like the unconditional jump, but
-        // pushes the address of the next instruction
-        // onto the stack before jumping, so that we
-        // can jump back with the 'ret' instruction.
-        u16 old_p = I->p;
-        u16 new_p = instr & 0x1fff;
-        I->p = (old_p & 0xc000) | (new_p << 1);
-        I->mem[I->s * 2] = srl(old_p + 1, 8);
-        I->mem[I->s * 2 + 1] = (old_p + 1) & 0x00ff;
-        I->s --;
-        I->flags |= JUMP_FLAG;
-        ok = 1;
-    } else if ((instrtype & 0x18) == 0x10) {
-        // 10xx?: conditional jumps
-        //
-        //      10xxJJJJ JJJJJJJJ
-        //
-        // Here, JJJ... is a relative jump amount
-        // forwards or backwards. So we can jump
-        // +/- 2^11 words in memory (= 2048
-        // instructions.) If you need to jump
-        // further, you can branch somewhere close
-        // by, then use an unconditional or register
-        // jump from there.
-        u8 op = (instr >> 12) & 3;
-        int16_t jump = instr & 0x0fff;
-        if (jump > 0x07ff) jump -= 0x1000;
-
-        u8 cond;
-
-        if (op == 0) {
-            // Branch if equal (i.e. is zero flag set)
-            cond = I->f & ZERO_FLAG;
-        } else if (op == 1) {
-            // Branch if not equal
-            cond = ~(I->f & ZERO_FLAG);
-        } else if (op == 2) {
-            // Branch if less than (ie. carry flag set)
-            cond = I->f & CARRY_FLAG;
-        } else if (op == 3) {
-            // Branch if greater than (neither carry flag nor zero flag set)
-            cond = ~(I->f & (CARRY_FLAG | ZERO_FLAG));
+        switch (op) {
+            case 0: should_jump = 1; break;
+            case 1: should_jump = (I->flags & ZERO_FLAG); break;
+            case 2: should_jump = !(I->flags & ZERO_FLAG); break;
+            case 3: should_jump = (I->flags & CARRY_FLAG); break;
+            case 4: should_jump = !(I->flags & CARRY_FLAG); break;
+            case 5: should_jump = (I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
+            case 6: should_jump = !(I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
+            case 7: should_jump = 1; break;
         }
 
-        if (cond) {
-            I->p += jump;
-            I->flags |= JUMP_FLAG;
+        if (should_jump) {
+            if (op == 7) {
+                // push return address for subroutine call
+                I->sp -= 2;
+                store_word(I, I->sp, I->pc + 2);
+            }
+
+            if (offset != 0) {
+                // relative jump
+                // sign-extend from 10 to 16 bits
+                u16 signbit = offset & 0x0200;
+                i16 soffset = (signed) offset;
+
+                if (signbit) {
+                    soffset -= 0x0400;
+                }
+
+                I->pc += soffset * 2;
+            } else {
+                // absolute jump
+                u16 new_addr = load_word(I, I->pc + 2);
+                I->pc = new_addr;
+            }
+
+            // don't advance pc
+            pc_increment = 0;
+        } else if (offset == 0) {
+            // if not jumping, need to jump over immediate address
+            pc_increment += 2;
         }
+
+
+        ok = 1;
     }
+    /* unused instruction space: prefix 0001 isn't anything */
 
     if (!ok) {
         // TODO put up a dialogue box or something on error! jeez, rude
@@ -647,8 +606,7 @@ void do_instr(interp *I) {
         // crash :(
         I->flags &= ~RUN_FLAG;
         I->flags |= CRASH_FLAG;
-    } else if (!(I->flags & JUMP_FLAG)) {
-        // only advance PC if we didn't just do a jump
-        I->p ++;
+    } else {
+        I->pc += pc_increment;
     }
 }
