@@ -10,6 +10,8 @@
 #define CARRY_FLAG 8
 #define ZERO_FLAG 16
 
+#define ROM_SIZE 65536
+
 typedef uint32_t u32;
 
 typedef int32_t i32;
@@ -29,7 +31,7 @@ char rom_title[15];
 // gone so far without heap allocation!
 // Maybe when switching banks it should read
 // the appropriate block from disk?
-unsigned char rom_buffer[65536];
+unsigned char rom_buffer[ROM_SIZE];
 
 // Here's our machine!
 typedef struct interp {
@@ -72,6 +74,7 @@ typedef struct interp {
     // of ROM at $0000 - $3fff, and any other
     // 16k of ROM at $4000 - $7fff.
     u8 rom_bank;
+
     // then, the top 16k of address space is
     // mapped to hardware registers, video ram,
     // sound ram, etc. haven't quite worked
@@ -82,6 +85,9 @@ typedef struct interp {
 
     // 64k of sweet sweet mem
     u8 mem[65536];
+
+    // video ram is mapped to $c000-$d000
+    u8 vram[4096];
 } interp;
 
 void do_instr(interp *I);
@@ -214,7 +220,7 @@ u16 load_word(interp *I, u16 addr) {
 
 int main (int argc, char **argv) {
     sfVideoMode mode = {192, 144, 32};
-    window = sfRenderWindow_create(mode, "vs-16", sfClose, NULL);
+    window = sfRenderWindow_create(mode, "VSI-16", sfClose, NULL);
     if (!window) {
         printf("Failed to initialize window.\n");
         return 1;
@@ -237,7 +243,7 @@ int main (int argc, char **argv) {
 
     FILE *rom = fopen(argv[1], "rb");
 
-    size_t size = fread(rom_buffer, 1, sizeof(I.mem), rom);
+    size_t size = fread(rom_buffer, 1, ROM_SIZE, rom);
 
     printf("Read %lu bytes from ROM.\n", size);
 
@@ -255,7 +261,7 @@ int main (int argc, char **argv) {
     printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
     printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
     printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
-    printf("     m: %04X n: %04X S: %04X P: %04X\n", I.m, I.n, I.sp, I.pc);
+    printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
 }
 
 void do_instr(interp *I) {
@@ -340,7 +346,9 @@ void do_instr(interp *I) {
         u8 dest_idx = srl(instr,  6) &  0xf;
         u8 src_idx  = srl(instr,  0) & 0x3f;
 
-        // again, reset MATH FLAGS
+        u8 carry = (I->flags & CARRY_FLAG) ? 1 : 0;
+
+        // reset flags for MATH
         I->flags &= ~CARRY_FLAG;
         I->flags &= ~ZERO_FLAG;
 
@@ -365,6 +373,12 @@ void do_instr(interp *I) {
             // Get the immediate value
             srcval = load_word(I, I->pc + 2);
             pc_increment += 2;
+        } else if (src_idx == 0x21) {
+            // yy yyyy = 10 0001
+            // This is just a special code for -1, since it's probably
+            // a common thing and we don't want to waste 16 bits on it.
+            // (e.g. if we want to compare to -1 or w/e)
+            srcval = 0xFFFF;
         } else {
             // uh I don't know what 0x2? or 0x3? should be yet
             // but we've got some room here to expand!
@@ -462,6 +476,25 @@ void do_instr(interp *I) {
             if (!(*dest & (1 << bit))) {
                 I->flags |= ZERO_FLAG;
             }
+        } else if (op == 0x16) {
+            // Add with carry
+            if ((u32)*dest + (u32)srcval + carry > 0xFFFF) {
+                I->flags |= CARRY_FLAG;
+            }
+            *dest += srcval + carry;
+        } else if (op == 0x17) {
+            // Subtract with carry
+            if ((i32)*dest - (i32)srcval - carry < 0x0000) {
+                I->flags |= CARRY_FLAG;
+            }
+            *dest -= srcval + carry;
+        } else if (op == 0x18) {
+            // Multiply with carry
+            // TODO maybe we want to have a full carry register...
+            if ((u32)*dest * (u32)srcval + carry > 0xFFFF) {
+                I->flags |= CARRY_FLAG;
+            }
+            *dest = *dest * srcval + carry;
         /* unused operation space here */
         } else if (op == 0x1e) {
             // Unsigned comparison
@@ -480,7 +513,7 @@ void do_instr(interp *I) {
         }
     } else if ((instrtype & 0xc) == 0x4) {
         // 01??: Load/store instructions
-        //      01ooxxxx00yyyyyy
+        //      01ooxxxx 00yyyyyy
         //     oo = operation type (load/store word/byte)
         //   xxxx = register to load/store into/from
         // yyyyyy = register w/ memory location (possibly imm. offset follows)
@@ -503,7 +536,7 @@ void do_instr(interp *I) {
             addr += load_word(I, I->pc + 2);
             pc_increment += 2;
         } else if (mem_id == 0x20) {
-            // yy yyyy = 01 0000; no register, immediate address following
+            // yy yyyy = 10 0000; no register, immediate address following
             addr = load_word(I, I->pc + 2);
             pc_increment += 2;
         } else {

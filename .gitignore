@@ -1,2 +1,8 @@
 test
 *.o
+*.pyc
+*.swp
+a.out
+parsetab.py
+parser.out
+*.rom
