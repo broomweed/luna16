@@ -1,7 +1,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-#include <SFML/Graphics.h>
+#include <SDL2/SDL.h>
 
 /* Interpreter flag constants */
 #define RUN_FLAG 1
@@ -11,6 +11,9 @@
 #define ZERO_FLAG 16
 
 #define ROM_SIZE 65536
+
+#define SCRW 192
+#define SCRH 144
 
 typedef uint32_t u32;
 
@@ -22,7 +25,8 @@ typedef int16_t i16;
 
 typedef uint8_t u8;
 
-sfRenderWindow *window;
+SDL_Window *window;
+SDL_Surface *screen;
 
 char rom_title[15];
 
@@ -91,6 +95,9 @@ typedef struct interp {
 } interp;
 
 void do_instr(interp *I);
+
+int init_draw();
+void draw(interp *I);
 
 void insert_string(u8 *mem, u16 offset, int length, char *str) {
     int i = 0;
@@ -219,11 +226,14 @@ u16 load_word(interp *I, u16 addr) {
 }
 
 int main (int argc, char **argv) {
-    sfVideoMode mode = {192, 144, 32};
-    window = sfRenderWindow_create(mode, "VSI-16", sfClose, NULL);
-    if (!window) {
-        printf("Failed to initialize window.\n");
-        return 1;
+    if (argc != 2) {
+        printf("Please supply a file name.\n");
+        return 0;
+    }
+
+    if (!init_draw()) {
+        fprintf(stderr, "Unable to initialize video.\n");
+        return -1;
     }
 
     interp I;
@@ -235,11 +245,6 @@ int main (int argc, char **argv) {
     // stack starts at 0x9ffe so it's always available
     // and not in a bank that might get swapped out
     I.sp = 0x9ffe;
-
-    if (argc != 2) {
-        printf("Please supply a file name.\n");
-        return 0;
-    }
 
     FILE *rom = fopen(argv[1], "rb");
 
@@ -253,7 +258,14 @@ int main (int argc, char **argv) {
     rom_title[14] = '\0';
     printf("Loaded: %s\n", rom_title);
 
+    unsigned int time = SDL_GetTicks();
+
+    draw(&I);
     while (I.flags & RUN_FLAG) {
+        if (SDL_GetTicks() - time >= 17) {
+            draw(&I);
+            time = SDL_GetTicks();
+        }
         do_instr(&I);
     }
 
@@ -262,6 +274,11 @@ int main (int argc, char **argv) {
     printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
     printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
     printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
+
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    return 0;
 }
 
 void do_instr(interp *I) {
@@ -512,8 +529,81 @@ void do_instr(interp *I) {
             I->flags |= ZERO_FLAG;
         }
     } else if ((instrtype & 0xc) == 0x4) {
-        // 01??: Load/store instructions
-        //      01ooxxxx 00yyyyyy
+        // prefix 01: jump
+        //
+        //      01ooooaa aaaaaaaa
+        //
+        // oooo = jump type
+        //          0: unconditional
+        //          1: equal (ZF)
+        //          2: not equal (~ZF)
+        //          3: less than (CF)
+        //          4: greater than or equal to (~CF)
+        //          5: less than or equal to (ZF|CF)
+        //          6: greater than (~(ZF|CF))
+        //              * TODO add signed jumps *
+        //         15: subroutine (save return address)
+        // a... = jump offset if relative jump
+        //          (measured in words, so we can jump
+        //           +/- 512 words, where instructions
+        //           are either 1 or 2 words)
+        //          (NOTE: if a = 0, uses an immediate
+        //           value following the instruction as
+        //           the address to jump to, rather than
+        //           a relative jump direction)
+        u8  op       = srl(instr, 10) &    0xf;
+        u16 offset   = srl(instr,  0) & 0x03ff;
+
+        u8 should_jump = 0;
+
+        switch (op) {
+            case  0: should_jump = 1; break;
+            case  1: should_jump = (I->flags & ZERO_FLAG); break;
+            case  2: should_jump = !(I->flags & ZERO_FLAG); break;
+            case  3: should_jump = (I->flags & CARRY_FLAG); break;
+            case  4: should_jump = !(I->flags & CARRY_FLAG); break;
+            case  5: should_jump = (I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
+            case  6: should_jump = !(I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
+            case 15: should_jump = 1; break;
+            default: fprintf(stderr, "Unknown jump condition %d\n", op);
+        }
+
+        if (should_jump) {
+            if (op == 7) {
+                // push return address for subroutine call
+                I->sp -= 2;
+                store_word(I, I->sp, I->pc + 2);
+            }
+
+            if (offset != 0) {
+                // relative jump
+                // sign-extend from 10 to 16 bits
+                u16 signbit = offset & 0x0200;
+                i16 soffset = (signed) offset;
+
+                if (signbit) {
+                    soffset -= 0x0400;
+                }
+
+                I->pc += soffset * 2;
+            } else {
+                // absolute jump
+                u16 new_addr = load_word(I, I->pc + 2);
+                I->pc = new_addr;
+            }
+
+            // don't advance pc
+            pc_increment = 0;
+        } else if (offset == 0) {
+            // if not jumping, need to jump over immediate address
+            pc_increment += 2;
+        }
+
+
+        ok = 1;
+    } else if ((instrtype & 0xe) == 0x2) {
+        // prefix 001: Load/store instructions
+        //      001ooxxx x0yyyyyy
         //     oo = operation type (load/store word/byte)
         //   xxxx = register to load/store into/from
         // yyyyyy = register w/ memory location (possibly imm. offset follows)
@@ -559,77 +649,6 @@ void do_instr(interp *I) {
             // Store byte
             store_byte(I, addr, (*reg) & 0xff);
         }
-    } else if ((instrtype & 0xe) == 0x2) {
-        // 001?: jump
-        //
-        //      001oooaa aaaaaaaa
-        //
-        // ooo = jump type
-        //          0: unconditional
-        //          1: equal (ZF)
-        //          2: not equal (~ZF)
-        //          3: less than (CF)
-        //          4: greater than or equal to (~CF)
-        //          5: less than or equal to (ZF|CF)
-        //          6: greater than (~(ZF|CF))
-        //          7: subroutine (save return address)
-        // a...= jump offset if relative jump
-        //          (measured in words, so we can jump
-        //           +/- 512 words, where instructions
-        //           are either 1 or 2 words)
-        //          (NOTE: if a = 0, uses an immediate
-        //           value following the instruction as
-        //           the address to jump to, rather than
-        //           a relative jump direction)
-        u8  op       = srl(instr, 10) &    0x7;
-        u16 offset   = srl(instr,  0) & 0x03ff;
-
-        u8 should_jump = 0;
-
-        switch (op) {
-            case 0: should_jump = 1; break;
-            case 1: should_jump = (I->flags & ZERO_FLAG); break;
-            case 2: should_jump = !(I->flags & ZERO_FLAG); break;
-            case 3: should_jump = (I->flags & CARRY_FLAG); break;
-            case 4: should_jump = !(I->flags & CARRY_FLAG); break;
-            case 5: should_jump = (I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
-            case 6: should_jump = !(I->flags & (ZERO_FLAG | CARRY_FLAG)); break;
-            case 7: should_jump = 1; break;
-        }
-
-        if (should_jump) {
-            if (op == 7) {
-                // push return address for subroutine call
-                I->sp -= 2;
-                store_word(I, I->sp, I->pc + 2);
-            }
-
-            if (offset != 0) {
-                // relative jump
-                // sign-extend from 10 to 16 bits
-                u16 signbit = offset & 0x0200;
-                i16 soffset = (signed) offset;
-
-                if (signbit) {
-                    soffset -= 0x0400;
-                }
-
-                I->pc += soffset * 2;
-            } else {
-                // absolute jump
-                u16 new_addr = load_word(I, I->pc + 2);
-                I->pc = new_addr;
-            }
-
-            // don't advance pc
-            pc_increment = 0;
-        } else if (offset == 0) {
-            // if not jumping, need to jump over immediate address
-            pc_increment += 2;
-        }
-
-
-        ok = 1;
     }
     /* unused instruction space: prefix 0001 isn't anything */
 
@@ -642,4 +661,35 @@ void do_instr(interp *I) {
     } else {
         I->pc += pc_increment;
     }
+}
+
+int init_draw() {
+    window = NULL;
+    screen = NULL;
+
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        fprintf(stderr, "Failed to initialize SDL. :(\n");
+        return 0;
+    }
+
+    window = SDL_CreateWindow("VSI-16",
+                              SDL_WINDOWPOS_UNDEFINED,
+                              SDL_WINDOWPOS_UNDEFINED,
+                              SCRW, SCRH,
+                              SDL_WINDOW_SHOWN);
+
+    screen = SDL_GetWindowSurface(window);
+
+    if (!window) {
+        fprintf(stderr, "Failed to create window: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    return 1;
+}
+
+void draw(interp *I) {
+    printf("Draw!\n");
+    SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0xFF, 0x00, 0x00));
+    SDL_UpdateWindowSurface(window);
 }

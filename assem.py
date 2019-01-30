@@ -42,7 +42,7 @@ def i_nop():
     return bytes([0x00, 0x01])
 
 @table('ret')
-def i_nop():
+def i_ret():
     return bytes([0x00, 0xaa])
 
 @table('push')
@@ -151,7 +151,7 @@ instr_table['cmp']  = gen_arith(0x1e)
 instr_table['cmps'] = gen_arith(0x1f)
 
 @table('lw')
-def i_lb(dest, src):
+def i_lw(dest, src):
     if type(src) != tuple or src[0] != 'ref':
         raise AssembleError(
             'source operand of LW must be a memory location'
@@ -166,6 +166,9 @@ def i_lb(dest, src):
 
     xxxx = get_reg(dest)
 
+    xxx = xxxx >> 1
+    x = xxxx & 1
+
     if type(origin) == tuple and origin[0] == 'reg':
         imm = offset
         yyyyyy = get_reg(origin)
@@ -176,7 +179,7 @@ def i_lb(dest, src):
         imm = src
         yyyyyy = 0x20
 
-    result = bytes([ 0x40 | xxxx, yyyyyy ])
+    result = bytes([ 0x20 | xxx, (x << 7) | yyyyyy ])
 
     if imm != 0:
         result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
@@ -199,6 +202,9 @@ def i_lb(dest, src):
 
     xxxx = get_reg(dest)
 
+    xxx = xxxx >> 1
+    x = xxxx & 1
+
     if type(origin) == tuple and origin[0] == 'reg':
         imm = offset
         yyyyyy = get_reg(origin)
@@ -209,7 +215,7 @@ def i_lb(dest, src):
         imm = src
         yyyyyy = 0x20
 
-    result = bytes([ 0x50 | xxxx, yyyyyy ])
+    result = bytes([ 0x28 | xxx, (x << 7) | yyyyyy ])
 
     if imm != 0:
         result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
@@ -224,6 +230,9 @@ def i_sw(dest, src):
         )
 
     xxxx = get_reg(src)
+
+    xxx = xxxx >> 1
+    x = xxxx & 1
 
     if type(dest) != tuple or dest[0] != 'ref':
         raise AssembleError(
@@ -241,7 +250,7 @@ def i_sw(dest, src):
         imm = src
         yyyyyy = 0x20
 
-    result = bytes([ 0x60 | xxxx, yyyyyy ])
+    result = bytes([ 0x30 | xxx, (x << 7) | yyyyyy ])
 
     if imm != 0:
         result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
@@ -256,6 +265,9 @@ def i_sb(dest, src):
         )
 
     xxxx = get_reg(src)
+
+    xxx = xxxx >> 1
+    x = xxxx & 1
 
     if type(dest) != tuple or dest[0] != 'ref':
         raise AssembleError(
@@ -275,12 +287,33 @@ def i_sb(dest, src):
         imm = src
         yyyyyy = 0x20
 
-    result = bytes([ 0x70 | xxxx, yyyyyy ])
+    result = bytes([ 0x38 | xxx, (x << 7) | yyyyyy ])
 
     if imm != 0:
         result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
 
     return result
+
+def gen_jump(code):
+    def inner(where):
+        jump_list.append((current_position, where))
+        return bytes([ 0x40 | (code << 2), 0x00, 0x00, 0x00 ])
+    return inner
+
+instr_table['jmp'] = gen_jump(0)
+instr_table['je']  = gen_jump(1)
+instr_table['jz']  = gen_jump(1)
+instr_table['jne'] = gen_jump(2)
+instr_table['jnz'] = gen_jump(2)
+instr_table['jlt'] = gen_jump(3)
+instr_table['jc']  = gen_jump(3)
+instr_table['jge'] = gen_jump(4)
+instr_table['jnc'] = gen_jump(4)
+instr_table['jle'] = gen_jump(5)
+instr_table['jgt'] = gen_jump(6)
+# TODO need signed comparison jumps
+# (and I guess rename the unsigned ones to like ja jb jbe etc)
+instr_table['jsr'] = gen_jump(15)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -329,24 +362,38 @@ if __name__ == "__main__":
             lineno, instr, args = line
 
             try:
-                opcode = instr_table[instr.lower()](*args)
-
-                if label != "":
-                    label_table[label] = current_position
-                    label = ""
-                    if current_position % 2 == 1:
-                        # for now, just align all labels to 4-byte boundaries
-                        # TODO we could do better by only doing this for ones targeted
-                        # with a J or CALL, but we'll do this later
-                        ba += inst_nop()
-
-                ba += opcode
-
-                current_position += 2
+                if instr != '(label)':
+                    opcode = instr_table[instr.lower()](*args)
+                    ba += opcode
+                    print(" ".join("%X" % x for x in opcode))
+                    current_position += len(opcode)
+                else:
+                    label_table[args] = current_position
             except KeyError:
                 print("Error: unknown instruction %s" % instr)
             except AssembleError as e:
                 print("Error at " + sys.argv[1] + " line %d:" % lineno, str(e))
                 print("    > ", source_lines[lineno - 1].strip())
+
+        added_bytes = 0
+
+        print("Resolving jumps...")
+        for (jump_from, label) in jump_list:
+            # NOTE: The current jump implementation is inefficient;
+            # it never uses relative jumps. I'm not smart enough to
+            # figure out when to use a short jump, since that moves
+            # all the labels around after the jump when it gets shorter.
+            # (and we might have already computed some jumps to those
+            # labels! oh no)
+            # There's definitely a good way to do this, where we make
+            # multiple passes and find out which jumps can be relative
+            # first (if we never add any bytes, this will never change,
+            # although we might miss a few that could be shortened.)
+            # I'll figure this out later. For now, we get the naive
+            # version.
+
+            # Add address for absolute jump
+            jump_to = label_table[label]
+            ba[jump_from+2:jump_from+4] = bytes([jump_to >> 8, jump_to & 0xff])
 
         outfile.write(ba)

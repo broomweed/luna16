@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=-Wall -O2
-LIBS=-lcsfml-graphics -lcsfml-window
+LIBS=-lSDL2
 
 test: main.o
 	$(CC) $(CFLAGS) main.c $(LIBS) -o test
