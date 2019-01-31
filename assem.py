@@ -17,6 +17,8 @@ jump_list = []
 
 current_position = 0
 
+fragments = []
+
 class AssembleError(Exception):
     pass
 
@@ -44,6 +46,18 @@ def i_nop():
 @table('ret')
 def i_ret():
     return bytes([0x00, 0xaa])
+
+@table('reti')
+def i_reti():
+    return bytes([0x00, 0xab])
+
+@table('di')
+def i_di():
+    return bytes([0x00, 0xdd])
+
+@table('ei')
+def i_ei():
+    return bytes([0x00, 0xee])
 
 @table('push')
 def i_push(reg):
@@ -84,7 +98,7 @@ def gen_arith(code):
             # Immediate operand
             if 0 <= src <= 15:
                 # Small immediate operand
-                yyyyyy = 0x10 & src
+                yyyyyy = 0x10 | src
             elif src == -1:
                 # Negative one
                 yyyyyy = 0x21
@@ -176,7 +190,7 @@ def i_lw(dest, src):
             yyyyyy &= 0x10
 
     elif type(origin) == int:
-        imm = src
+        imm = origin
         yyyyyy = 0x20
 
     result = bytes([ 0x20 | xxx, (x << 7) | yyyyyy ])
@@ -212,7 +226,7 @@ def i_lb(dest, src):
             yyyyyy &= 0x10
 
     elif type(origin) == int:
-        imm = src
+        imm = origin
         yyyyyy = 0x20
 
     result = bytes([ 0x28 | xxx, (x << 7) | yyyyyy ])
@@ -247,7 +261,7 @@ def i_sw(dest, src):
         if offset != 0:
             yyyyyy &= 0x10
     elif type(origin) == int:
-        imm = src
+        imm = origin
         yyyyyy = 0x20
 
     result = bytes([ 0x30 | xxx, (x << 7) | yyyyyy ])
@@ -284,7 +298,7 @@ def i_sb(dest, src):
             imm = offset
             yyyyyy = get_reg(origin) & 0x10
     elif type(origin) == int:
-        imm = src
+        imm = origin
         yyyyyy = 0x20
 
     result = bytes([ 0x38 | xxx, (x << 7) | yyyyyy ])
@@ -296,7 +310,7 @@ def i_sb(dest, src):
 
 def gen_jump(code):
     def inner(where):
-        jump_list.append((current_position, where))
+        jump_list.append((fragment_id, current_position, where))
         return bytes([ 0x40 | (code << 2), 0x00, 0x00, 0x00 ])
     return inner
 
@@ -314,6 +328,74 @@ instr_table['jgt'] = gen_jump(6)
 # TODO need signed comparison jumps
 # (and I guess rename the unsigned ones to like ja jb jbe etc)
 instr_table['jsr'] = gen_jump(15)
+
+current_position = 0x0
+section_offset = -1
+section_id = "?"
+fragment_id = 0
+
+ba = bytearray()
+
+def end_section():
+    global fragment_id
+    # Save current fragment and start a new one.
+    # Offset of -1 means 'wherever idk'
+    if len(ba) > 0:
+        fragments.append({
+            'name': section_id,
+            'section': 'rom',
+            'offset': section_offset,
+            'data': ba
+        })
+        fragment_id += 1
+
+def new_section(sid, offset):
+    global section_id, section_offset, ba, current_position
+    end_section()
+    section_offset = offset
+    section_id = sid
+    ba = bytearray()
+    current_position = 0x0
+
+def handle_directive(dct, args):
+    if dct == '#at':
+        # Directive #at tells the assembler to insert
+        # following code at a particular byte address
+        # in the ROM. Useful for interrupt handlers.
+        if len(args) != 2:
+            raise AssembleError("#at needs two arguments: offset and section name")
+        if type(args[0]) != int:
+            raise AssembleError("first argument to #at must be integer offset")
+        if type(args[1]) != tuple or args[1][0] != 'str':
+            raise AssembleError("second argument to #at must be string")
+        new_section(args[1][1], args[0])
+    elif dct == '#section':
+        # Tells the assembler the next part doesn't have
+        # to be contiguous with the last. This is like
+        # #at, but doesn't specify a particular place to
+        # put the code.
+        if len(args) != 1:
+            raise AssembleError("#section needs one argument: section name")
+        if type(args[0]) != tuple or args[0][0] != 'str':
+            raise AssembleError("argument to #section must be string")
+        new_section(args[0][1], -1)
+    else:
+        raise AssembleError("unknown directive '%s'" % dct)
+
+def overlap_error(frag1, frag2):
+    name1 = frag1['name']
+    offset1 = frag1['offset']
+    length1 = len(frag1['data'])
+
+    name2 = frag2['name']
+    offset2 = frag2['offset']
+    length2 = len(frag2['data'])
+
+    print("Error: section '%s' overlaps with section '%s'" % (name1, name2))
+    print("%24s offset: %6d ($%04X)" % (name1, offset1, offset1))
+    print("%24s length: %6d ($%04X)" % (name1, length1, length1))
+    print("%24s offset: %6d ($%04X)" % (name2, offset2, offset2))
+    print("%24s length: %6d ($%04X)" % (name2, length2, length2))
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -337,24 +419,24 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 4:
         romtitle = "????"
-    elif len(sys.argv[3]) > 14:
-        print("Title too long. Max length 14 characters.")
+    elif len(sys.argv[3]) > 30:
+        print("Title too long. Max length 30 characters.")
         sys.exit(0)
     else:
         romtitle = sys.argv[3]
 
     with open(sys.argv[1]) as infile, open(outfilename, 'wb') as outfile:
-        ba = bytearray()
+        new_section("header", 0)
+
+        offset = 0
 
         # Write header
         ba += bytes([0xCA, 0x55])
         ba += romtitle.encode('utf-8')
 
-        ba += bytes([0] * (254 - len(romtitle)))
+        ba += bytes([0] * (126 - len(romtitle)))
 
-        current_position = 0x100
-
-        label = ""
+        new_section("?", -1)
 
         print("Assembling...")
 
@@ -362,23 +444,137 @@ if __name__ == "__main__":
             lineno, instr, args = line
 
             try:
-                if instr != '(label)':
-                    opcode = instr_table[instr.lower()](*args)
+                if instr.startswith('#'):
+                    # Handle directive.
+                    handle_directive(instr, args)
+                elif instr != '(label)':
+                    try:
+                        opcode = instr_table[instr.lower()](*args)
+                    except KeyError:
+                        raise AssembleError("unknown instruction '%s'" % instr)
                     ba += opcode
                     print(" ".join("%X" % x for x in opcode))
                     current_position += len(opcode)
                 else:
-                    label_table[args] = current_position
-            except KeyError:
-                print("Error: unknown instruction %s" % instr)
+                    label_table[args] = (fragment_id, current_position)
             except AssembleError as e:
                 print("Error at " + sys.argv[1] + " line %d:" % lineno, str(e))
                 print("    > ", source_lines[lineno - 1].strip())
 
-        added_bytes = 0
+        end_section()
 
+        print("Placing fragments...")
+
+        # Figure out the memory layout of the ROM. We structure this list like
+        # [ frag1, 64, frag2, frag3, 128 ] -- numbers represent free bytes,
+        # and non-numbers represent fragments to put there.
+        layout = [ 1 ]
+
+        overlaps = 0
+
+        # First, make sure we can fit all the fixed-position fragments.
+        for frag in (f for f in fragments if f['offset'] != -1):
+            offset = frag['offset']
+            length = len(frag['data'])
+            name = frag['name']
+
+            if offset % 2 == 1:
+                print("Error: section '%s' is misaligned. Offsets must "
+                      "be multiples of 2. (current offset: %d/$%04X)"
+                      % (name, offset, offset))
+                break
+
+            # Find the appropriate chunk of free space to place it
+            byte_index = 0
+            for i in range(len(layout)):
+                if type(layout[i]) == int:
+                    byte_index += layout[i]
+                    if byte_index > offset:
+                        # Ooh, put it here!
+                        # Back up one chunk so we have the byte index
+                        # of the beginning of the free chunk
+                        byte_index -= layout[i]
+                        # How much free space before?
+                        free_before = offset - byte_index
+                        # How much free space after?
+                        free_after = byte_index + layout[i] - (offset + length)
+                        if free_after < 0 and i < len(layout)-1:
+                            next_offset = layout[i+1]['offset']
+                            next_length = len(layout[i+1]['data'])
+                            next_name = layout[i+1]['name']
+
+                            overlap_error(frag, layout[i+1])
+                            overlaps += 1
+                            break
+                        else:
+                            # Put this fragment in.
+                            new_list = []
+                            if free_before > 0:
+                                new_list.append(free_before)
+                            new_list.append(frag)
+                            if free_after > 0:
+                                new_list.append(free_after)
+                            layout[i:i+1] = new_list
+                            break
+                else:
+                    # Move over this fragment and make sure we didn't go too far
+                    byte_index += len(layout[i]['data'])
+                    if byte_index > offset:
+                        overlap_error(frag, layout[i])
+                        overlaps += 1
+                        break
+            else:
+                # We didn't break, so we must have run off the end.
+                # This means we need to insert more free space at the
+                # end of the rom
+                gap = offset - byte_index
+                if gap > 0:
+                    layout.append(gap)
+                layout.append(frag)
+
+
+            print("Inserted fragment %s, layout now:" % frag['name'],
+                [f if type(f) == int else f['name'] for f in layout]
+            )
+
+        if overlaps > 0:
+            sys.exit(1)
+
+        # Now place all the movable fragments
+        for frag in (f for f in fragments if f['offset'] == -1):
+            size = len(frag['data'])
+
+            byte_offset = 0
+            for i, space in enumerate(layout):
+                if type(space) != int:
+                    byte_offset += len(space['data'])
+                    continue
+
+                byte_offset += space
+                if size <= space:
+                    # It fits! This is a p. greedy algorithm
+                    # but I think that's ok for now
+                    byte_offset -= space
+                    newlist = [ frag ]
+                    if size != space:
+                        newlist.append(space - size)
+
+                    layout[i:i+1] = newlist
+                    frag['offset'] = byte_offset
+                    break
+            else:
+                # We can just tack it directly onto the end
+                frag['offset'] = byte_offset
+                layout.append(frag)
+
+            print("Inserted fragment %s, layout now:" % frag['name'],
+                [f if type(f) == int else f['name'] for f in layout]
+            )
+
+        # TODO temporarily not resolving jumps for a sec here
         print("Resolving jumps...")
-        for (jump_from, label) in jump_list:
+
+        for (frag_id, jump_from, label) in jump_list:
             # NOTE: The current jump implementation is inefficient;
             # it never uses relative jumps. I'm not smart enough to
             # figure out when to use a short jump, since that moves
@@ -393,7 +589,17 @@ if __name__ == "__main__":
             # version.
 
             # Add address for absolute jump
-            jump_to = label_table[label]
-            ba[jump_from+2:jump_from+4] = bytes([jump_to >> 8, jump_to & 0xff])
+            fragment, offset = label_table[label]
+            jump_to = fragments[fragment]['offset'] + offset
+            fragments[frag_id]['data'][jump_from+2:jump_from+4] \
+                                = bytes([jump_to >> 8, jump_to & 0xff])
 
-        outfile.write(ba)
+        # Now put together the whole thing
+        arr = bytearray()
+        for fragment in layout:
+            if type(fragment) == int:
+                arr += bytes([0] * fragment)
+            else:
+                arr += fragment['data']
+
+        outfile.write(arr)

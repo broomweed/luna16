@@ -9,6 +9,10 @@
 #define JUMP_FLAG 4
 #define CARRY_FLAG 8
 #define ZERO_FLAG 16
+// TODO overflow flag
+#define INTERRUPT_ENABLE 64
+// enable interrupts NEXT instruction
+#define INTERRUPT_ENABLE_NEXT 128
 
 #define ROM_SIZE 65536
 
@@ -28,7 +32,7 @@ typedef uint8_t u8;
 SDL_Window *window;
 SDL_Surface *screen;
 
-char rom_title[15];
+char rom_title[31];
 
 // uh, this can be arbitrarily big I guess
 // I'll probably heap-allocate this? But I've
@@ -65,7 +69,7 @@ typedef struct interp {
     u16 pc;
 
     // interpreter flags
-    u8 flags;
+    u16 flags;
 
     // bank IDs (for accessing more RAM/ROM)
     // we always get the bottom 8k of RAM at
@@ -95,6 +99,8 @@ typedef struct interp {
 } interp;
 
 void do_instr(interp *I);
+
+void interrupt(interp *I, u16 addr);
 
 int init_draw();
 void draw(interp *I);
@@ -172,6 +178,12 @@ void store_byte(interp *I, u16 addr, u8 value) {
         return;
     }
 
+    // video ram is $c000-$cfff
+    if (addr < 0xd000) {
+        I->vram[addr - 0xc000] = value;
+        return;
+    }
+
     printf("Unimplemented writing to thing!\n");
 }
 
@@ -194,6 +206,11 @@ u8 load_byte(interp *I, u16 addr) {
     // Reading $a000 - $bfff returns values in other 8k of RAM
     if (addr < 0xc000) {
         return I->mem[addr - 0xa000 + I->ram_bank * 0x2000];
+    }
+
+    // Reading $c000 - $cfff reads from video RAM
+    if (addr < 0xd000) {
+        return I->vram[addr - 0xc000];
     }
 
     printf("Unimplemented reading from thing!\n");
@@ -237,7 +254,7 @@ int main (int argc, char **argv) {
     }
 
     interp I;
-    I.flags = RUN_FLAG;
+    I.flags = RUN_FLAG | INTERRUPT_ENABLE;
 
     // program starts at 0x0100, after a 256-byte header
     I.pc = 0x0100;
@@ -254,17 +271,31 @@ int main (int argc, char **argv) {
 
     I.rom = rom_buffer;
 
-    strncpy(rom_title, (char*)&rom_buffer[2], 14);
-    rom_title[14] = '\0';
+    strncpy(rom_title, (char*)&rom_buffer[2], 30);
+    rom_title[30] = '\0';
     printf("Loaded: %s\n", rom_title);
 
     unsigned int time = SDL_GetTicks();
 
     draw(&I);
     while (I.flags & RUN_FLAG) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            // quit when we close the window
+            // otherwise infinite loops become terrible
+            if (event.type == SDL_QUIT) {
+                I.flags &= ~RUN_FLAG;
+            }
+        }
         if (SDL_GetTicks() - time >= 17) {
             draw(&I);
             time = SDL_GetTicks();
+            // vblank interrupt
+            interrupt(&I, 0x84);
+        }
+        if (I.flags & INTERRUPT_ENABLE_NEXT) {
+            I.flags &= ~INTERRUPT_ENABLE_NEXT;
+            I.flags |= INTERRUPT_ENABLE;
         }
         do_instr(&I);
     }
@@ -287,7 +318,7 @@ void do_instr(interp *I) {
     // first 4 bits are the opcode
     u16 instrtype = srl(instr, 12) & 0xf;
 
-    printf("Instruction @ 0x%04X: 0x%04X\n", I->pc, instr);
+    //printf("Instruction @ 0x%04X: 0x%04X\n", I->pc, instr);
 
     int ok = 0;
 
@@ -318,6 +349,22 @@ void do_instr(interp *I) {
                 // don't increase pc
                 pc_increment = 0;
                 ok = 1;
+            } else if (rest == 0xab) {
+                // 0x00ab = RETI
+                // return and enable interrupts
+                u16 retaddr = load_word(I, I->sp);
+                I->sp += 2;
+                I->pc = retaddr;
+                I->flags |= INTERRUPT_ENABLE;
+                // don't increase pc
+                pc_increment = 0;
+                ok = 1;
+            } else if (rest == 0xdd) {
+                // 0x00ee = disable interrupts
+                I->flags &= ~INTERRUPT_ENABLE;
+            } else if (rest == 0xee) {
+                // 0x00ee = enable interrupts
+                I->flags |= INTERRUPT_ENABLE_NEXT;
             }
         } else if (subcode == 1) {
             // PUSH
@@ -610,8 +657,8 @@ void do_instr(interp *I) {
 
         ok = 1;
 
-        u8 op     = srl(instr, 12) &  0x3;
-        u8 reg_id = srl(instr,  8) &  0xf;
+        u8 op     = srl(instr, 11) &  0x3;
+        u8 reg_id = srl(instr,  7) &  0xf;
         u8 mem_id = srl(instr,  0) & 0x3f;
 
         u16 *reg = get_reg(I, reg_id);
@@ -663,6 +710,21 @@ void do_instr(interp *I) {
     }
 }
 
+void interrupt(interp *I, u16 addr) {
+    // Do an interrupt. Push the current pc to the stack,
+    // disable interrupts, and jump to the specified address.
+    // (But not if interrupts are disabled.)
+    if (!(I->flags & INTERRUPT_ENABLE)) {
+        printf("Interrupts disabled. :(\n");
+        return;
+    }
+    I->sp -= 2;
+    store_word(I, I->sp, I->pc);
+    I->flags |= ~INTERRUPT_ENABLE;
+    I->pc = addr;
+    //printf("Interrupted! pc: %04X\n", I->pc);
+}
+
 int init_draw() {
     window = NULL;
     screen = NULL;
@@ -689,7 +751,7 @@ int init_draw() {
 }
 
 void draw(interp *I) {
-    printf("Draw!\n");
-    SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0xFF, 0x00, 0x00));
+    //printf("Draw! [ %02X, %02X, %02X ]\n", I->vram[0], I->vram[1], I->vram[2]);
+    SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, I->vram[0], I->vram[1], I->vram[2]));
     SDL_UpdateWindowSurface(window);
 }

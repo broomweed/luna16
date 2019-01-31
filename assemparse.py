@@ -18,11 +18,7 @@ def p_line_empty(p):
     '''line : EOL'''
     p[0] = None
 
-def p_label_dot(p):
-    '''label : DOT NAME'''
-    p[0] = '.' + p[2]
-
-def p_label_nodot(p):
+def p_label(p):
     '''label : NAME'''
     p[0] = p[1]
 
@@ -40,7 +36,7 @@ def p_line_params(p):
 
 def p_line_directive(p):
     '''line : directive EOL'''
-    p[0] = (p.lineno(2), p[1])
+    p[0] = (p.lineno(2), *p[1])
 
 def p_params_single(p):
     '''params : param'''
@@ -74,9 +70,29 @@ def p_simpleparam_reg(p):
     '''simpleparam : REG'''
     p[0] = ('reg', p[1])
 
-def p_directive(p):
-    '''directive : HASH NAME params'''
-    p[0] = ('#' + p[2], p[3])
+def p_directive_params(p):
+    '''directive : HASHTAG dirparams'''
+    p[0] = (p[1], p[2])
+
+def p_directive_noparams(p):
+    '''directive : HASHTAG'''
+    p[0] = (p[1], [])
+
+def p_dirparams_single(p):
+    '''dirparams : dirparam'''
+    p[0] = [ p[1] ]
+
+def p_dirparams_multiple(p):
+    '''dirparams : dirparams dirparam'''
+    p[0] = p[1] + [ p[2] ]
+
+def p_dirparam_simple(p):
+    '''dirparam : simpleparam'''
+    p[0] = p[1]
+
+def p_dirparam_str(p):
+    '''dirparam : STRING'''
+    p[0] = ('str', p[1])
 
 def p_error(p):
     print("Error at token", p.type)

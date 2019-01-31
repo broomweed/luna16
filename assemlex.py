@@ -1,8 +1,8 @@
 import ply.lex as lex
 
-tokens = [ 'REG', 'NAME', 'NUMBER', 'OPENPAREN', 'CLOSEPAREN', 'EOL',
-           'COMMA', 'OPENBRACKET', 'CLOSEBRACKET', 'COLON',
-           'DOT', 'HASH' ]
+tokens = [ 'REG', 'NAME', 'NUMBER', 'OPENPAREN', 'CLOSEPAREN',
+           'EOL', 'COMMA', 'OPENBRACKET', 'CLOSEBRACKET',
+           'COLON', 'HASHTAG', 'STRING' ]
 
 t_ignore = ' \t\r'
 
@@ -12,12 +12,16 @@ t_OPENBRACKET = r'\['
 t_CLOSEBRACKET = r'\]'
 t_COMMA = r','
 t_COLON = r':'
-t_DOT = r'\.'
-t_HASH = r'\#'
+t_HASHTAG = r'\#[a-zA-Z0-9_]+'
 
 def t_EOL(t):
     r'\n'
     t.lexer.lineno += 1
+    return t
+
+def t_STRING(t):
+    r'"([^"]|\\.)*"'
+    t.value = t.value[1:len(t.value)-1]
     return t
 
 registers = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'sp' 'pc' }
@@ -26,7 +30,7 @@ def t_error(t):
     print("Unrecognized character...\n", t.value)
 
 def t_NAME(t):
-    r'[a-zA-Z_][a-zA-Z0-9_]*'
+    r'\.?[a-zA-Z_][a-zA-Z0-9_]*'
     if t.value.lower() in registers:
         t.type = 'REG'
     else:
