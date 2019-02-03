@@ -10,7 +10,7 @@ states = (
 
 t_ignore = ' \t\r'
 
-t_data_ignore = ' \t\r_'
+t_data_ignore = ' \t\r_$'
 
 t_OPENPAREN = r'\('
 t_CLOSEPAREN = r'\)'

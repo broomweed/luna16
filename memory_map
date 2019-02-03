@@ -1,0 +1,20 @@
+ROM0 = 16k 				$0000 - $3FFF
+   -> $84 vblank interrupt
+ROMn = 16k 				$4000 - $7FFF
+RAM0 = 8k				$8000 - $9FFF
+RAMn = 8k				$A000 - $BFFF
+
+map = 2048 ($800)		$C000 - $C7FF
+map2 = 2048 ($800)		$C800 - $CFFF
+OAM = 1024 ($400)		$D000 - $D3FF
+palette = 256 ($100)	$D400 - $D4FF
+lowpattern = 128 ($80)	$D500 - $D57F
+highpattern = 128 ($80)	$D580 - $D5FF
+ * unused space *		$D600 - $D7F8
+pattern offset (byte)	$D7F9
+h offset 1 (byte)		$D7FA
+v offset 1 (byte)		$D7FB
+h offset 2 (byte)		$D7FC
+v offset 2 (byte)		$D7FD
+sprite h offset (byte)	$D7FE
+sprite v offset (byte)  $D7FF

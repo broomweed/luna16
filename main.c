@@ -87,18 +87,12 @@ typedef struct interp {
     // we always get the bottom 8k of RAM at
     // $8000 - $9FFF, and any other 8k of RAM
     // at $a000 - $bfff. we can swap banks by
-    // writing to some specific memory address
-    // that I haven't figured out yet
+    // writing to certain addresses
     u8 ram_bank;
     // similarly, we always get the bottom 16k
     // of ROM at $0000 - $3fff, and any other
     // 16k of ROM at $4000 - $7fff.
     u8 rom_bank;
-
-    // then, the top 16k of address space is
-    // mapped to hardware registers, video ram,
-    // sound ram, etc. haven't quite worked
-    // this all out yet
 
     // pointer to ROM data
     u8 *rom;
