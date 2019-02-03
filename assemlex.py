@@ -2,9 +2,15 @@ import ply.lex as lex
 
 tokens = [ 'REG', 'NAME', 'NUMBER', 'OPENPAREN', 'CLOSEPAREN',
            'EOL', 'COMMA', 'OPENBRACKET', 'CLOSEBRACKET',
-           'COLON', 'HASHTAG', 'STRING' ]
+           'COLON', 'HASHTAG', 'STRING', 'DATA' ]
+
+states = (
+    ('data', 'exclusive'),
+)
 
 t_ignore = ' \t\r'
+
+t_data_ignore = ' \t\r_'
 
 t_OPENPAREN = r'\('
 t_CLOSEPAREN = r'\)'
@@ -13,6 +19,22 @@ t_CLOSEBRACKET = r'\]'
 t_COMMA = r','
 t_COLON = r':'
 t_HASHTAG = r'\#[a-zA-Z0-9_]+'
+
+def t_data_NUMBER(t):
+    r'[0-9a-fA-F][0-9a-fA-F]'
+    t.value = int(t.value, 16)
+    return t
+
+def t_data_EOL(t):
+    r'\n'
+    t.lexer.lineno += 1
+    t.lexer.begin('INITIAL')
+    return t
+
+def t_DATA(t):
+    r'data|DATA'
+    t.lexer.begin('data')
+    return t
 
 def t_EOL(t):
     r'\n'
@@ -38,15 +60,19 @@ def t_NAME(t):
     return t
 
 def t_NUMBER(t):
-    r'-?((\$|0x)-?[0-9a-fA-F]+|-?[0-9]+|-?0b[01]+|-?0q[0-3]+)'
+    r'-?((\$|0x)-?[0-9a-fA-F_]+|-?(0b|%)[01_]+|-?0q[0-3_]+|-?[0-9_]+)'
 
     nega = False
     if t.value.startswith('-'):
         nega = True
         t.value = t.value[1:]
 
+    t.value = t.value.replace("_", "")
+
     if t.value.startswith('$'):
         t.value = int(t.value[1:], 16)
+    elif t.value.startswith('%'):
+        t.value = int(t.value[1:], 2)
     elif t.value.startswith('0x'):
         t.value = int(t.value[2:], 16)
     elif t.value.startswith('0b'):
@@ -63,6 +89,16 @@ def t_NUMBER(t):
 
 def t_COMMENT(t):
     r';.*\n'
-    pass
+    t.lexer.lineno += 1
+    t.type = 'EOL'
+    t.value = "\n"
+    return t
+
+def t_data_COMMENT(t):
+    r';.*\n'
+    t.lexer.lineno += 1
+    t.type = 'EOL'
+    t.value = "\n"
+    return t
 
 lexer = lex.lex()

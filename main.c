@@ -13,11 +13,18 @@
 #define INTERRUPT_ENABLE 64
 // enable interrupts NEXT instruction
 #define INTERRUPT_ENABLE_NEXT 128
+#define WAIT_FLAG 256
 
 #define ROM_SIZE 65536
 
-#define SCRW 192
-#define SCRH 144
+#define SCALE 4
+
+//#define DEBUG
+
+#ifdef DEBUG
+int debug_counter = 0;
+int instr_counter = 0;
+#endif
 
 typedef uint32_t u32;
 
@@ -29,16 +36,21 @@ typedef int16_t i16;
 
 typedef uint8_t u8;
 
+typedef int8_t i8;
+
 SDL_Window *window;
 SDL_Surface *screen;
+SDL_Texture *texture;
+SDL_Renderer *renderer;
+
+int widescreen = 0;
+int SCRW;
+int SCRH;
 
 char rom_title[31];
 
 // uh, this can be arbitrarily big I guess
-// I'll probably heap-allocate this? But I've
-// gone so far without heap allocation!
-// Maybe when switching banks it should read
-// the appropriate block from disk?
+// I'll probably heap-allocate this later
 unsigned char rom_buffer[ROM_SIZE];
 
 // Here's our machine!
@@ -91,16 +103,77 @@ typedef struct interp {
     // pointer to ROM data
     u8 *rom;
 
-    // 64k of sweet sweet mem
+    // 64k of sweet sweet RAM
     u8 mem[65536];
 
-    // video ram is mapped to $c000-$d000
-    u8 vram[4096];
+    struct ppu *ppu;
 } interp;
+
+// "PPU" stuff
+typedef struct ppu {
+    // Horizontal/vertical drawing offset
+    // (-128 to +127)
+    i8 sprite_h_offset;
+    i8 sprite_v_offset;
+    i8 bg_h_offset;
+    i8 bg_v_offset;
+    i8 fg_h_offset;
+    i8 fg_v_offset;
+    //
+    // palette data % 0rrrrrgg gggbbbbb
+    //
+    // (8 sprite palettes + 8 tile palettes)
+    // x 8 colors each x 2 bytes/color = 256 bytes
+    u8 palette_data[256];
+    //
+    // 32 x 32 background tilemap
+    // 2 bytes/tile
+    //
+    // 2 x 32 x 32 = 2K
+    //
+    // format %ppphv??n %iiiiiiii
+    // p = palette; i = pattern index
+    // n = high/low half of pattern table
+    // h,v = horizontal/vertical flip
+    u8 bg_map_data[2048];
+    //
+    // 32x32 foreground tilemap
+    //
+    // same as above
+    u8 fg_map_data[2048];
+    //
+    // OAM - positions of sprites on screen
+    //
+    // 4 bytes per sprite:
+    // %ppplhvsn %iiiiiiii %xxxxxxxx %yyyyyyyy
+    // p = palette; i = sprite index; x,y = coords
+    // n = high/low half of pattern table
+    // l = layer (if 1, show above fg map)
+    // h,v = horizontal/vertical flip
+    // s = size (if 1, 16x16 else 8x8)
+    // 256 sprites on screen max. 256 x 4 = 1K
+    u8 oam[1024];
+    //
+    // sprite/tile data
+    //
+    // 4bpp, first bit is 'priority bit' for layering
+    // (priority bit set on bg tile = shows in front of
+    //  non-priority sprite pixels)
+    // other 3 bits are the color
+    // i know, it's weird but i had to have an excuse
+    // to use only 8 colors rather than 16 for the
+    // a e s t h e t i c
+    // anyway we have 512 tiles x 1/2 byte/pixel
+    // x 8 pixels wide x 8 pixels tall = 16K
+    u8 pattern_offset;
+    u8 pattern_table[16384];
+} ppu;
 
 void do_instr(interp *I);
 
 void interrupt(interp *I, u16 addr);
+
+void init_ppu(ppu *p);
 
 int init_draw();
 void draw(interp *I);
@@ -134,6 +207,9 @@ u16 *get_reg(interp *I, char reg_id) {
         case 15: return &I->pc; break;
         default:
             fprintf(stderr, "internal error: invalid reg id %d\n", reg_id);
+#ifdef DEBUG
+            debug_counter = 0;
+#endif
             return 0;
     }
 }
@@ -161,30 +237,105 @@ void store_byte(interp *I, u16 addr, u8 value) {
     if (addr < 0x8000) {
         fprintf(stderr, "Attempt to write to ROM-mapped location $%04X "
                 "(pc: $%04X)\n", addr, I->pc);
-        return;
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
     }
 
     // 0x8000-0x9fff is always the first 8k of RAM
-    if (addr < 0xa000) {
+    else if (addr < 0xa000) {
         I->mem[addr - 0x8000] = value;
-        return;
     }
 
     // writing to 0xa000-0xbfff writes to the current banked chunk of RAM
     // (there are 8 of these, although #0 is always also mapped to
     // 0x8000-0x9fff)
-    if (addr < 0xc000) {
+    else if (addr < 0xc000) {
         I->mem[addr - 0xa000 + I->ram_bank * 0x2000] = value;
-        return;
     }
 
-    // video ram is $c000-$cfff
-    if (addr < 0xd000) {
-        I->vram[addr - 0xc000] = value;
-        return;
+    // $c000 - $cfff is reserved for video-related stuff (tho not all
+    // of it is used atm.)
+
+    // $c000 - $c7ff is background tilemap
+    else if (addr < 0xc800) {
+        I->ppu->bg_map_data[addr - 0xc000] = value;
+    }
+    // $c800 - $cfff is foreground tilemap
+    else if (addr < 0xd000) {
+        I->ppu->fg_map_data[addr - 0xc800] = value;
+    }
+    // $d000 - $d3ff is OAM
+    else if (addr < 0xd400) {
+        I->ppu->oam[addr - 0xd000] = value;
+    }
+    // $d400 - $d4ff is palette data
+    else if (addr < 0xd500) {
+        I->ppu->palette_data[addr - 0xd400] = value;
+    }
+    // $d500 - $d57f is 128 bytes of the low half of the
+    // pattern table at offset [$cffb] * 32
+    else if (addr < 0xd57f) {
+        I->ppu->pattern_table[I->ppu->pattern_offset * 32 + addr - 0xd500] = value;
+    }
+    // $d580 - $d5ff is 128 bytes of the high half of the
+    // pattern table at offset [$cffb] * 32
+    else if (addr < 0xd600) {
+        I->ppu->pattern_table[(I->ppu->pattern_offset * 32
+                                + addr - 0xd580 + 8192) % 0x10000] = value;
+    }
+    // 505 bytes at $d600 - $d7f8 is currently unused, but reserved
+    else if (addr < 0xcff9) {
+        /* nothing happens */
+        printf("Unimplemented writing to %04X\n", addr);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
+    }
+    // $d7f9 is the pattern table offset value
+    else if (addr == 0xd7f9) {
+        I->ppu->pattern_offset = value;
+    }
+    // $d7fa is the BG layer's horizontal offset (signed)
+    else if (addr == 0xd7fa) {
+        I->ppu->bg_h_offset = value;
+    }
+    // $d7fb is the BG layer's vertical offset (signed)
+    else if (addr == 0xd7fb) {
+        I->ppu->bg_v_offset = value;
+    }
+    // $d7fc is the FG layer's horizontal offset (signed)
+    else if (addr == 0xd7fc) {
+        I->ppu->fg_h_offset = value;
+    }
+    // $d7fd is the FG layer's vertical offset (signed)
+    else if (addr == 0xd7fd) {
+        I->ppu->fg_v_offset = value;
+    }
+    // $d7fe is the sprite layer's horizontal offset (signed)
+    else if (addr == 0xd7fe) {
+        I->ppu->sprite_h_offset = value;
+    }
+    // $d7ff is the sprite layer's vertical offset (signed)
+    else if (addr == 0xd7ff) {
+        I->ppu->sprite_v_offset = value;
     }
 
-    printf("Unimplemented writing to thing!\n");
+    // 0xfd00+ = magic addresses
+    else if (addr == 0xfd00) {
+        I->rom_bank = value;
+    }
+
+    else if (addr == 0xfd01) {
+        I->ram_bank = value;
+    }
+
+    else {
+        printf("Unimplemented writing to %04X\n", addr);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
+    }
 }
 
 u8 load_byte(interp *I, u16 addr) {
@@ -194,32 +345,109 @@ u8 load_byte(interp *I, u16 addr) {
     }
 
     // Reading $4000 - $7fff returns stuff in a different 16k chunk of ROM
-    if (addr < 0x8000) {
+    else if (addr < 0x8000) {
         return I->rom[addr + I->rom_bank * 0x4000];
     }
 
     // Reading $8000 - $9fff returns values in first 8k of RAM
-    if (addr < 0xa000) {
+    else if (addr < 0xa000) {
         return I->mem[addr - 0x8000];
     }
 
     // Reading $a000 - $bfff returns values in other 8k of RAM
-    if (addr < 0xc000) {
+    else if (addr < 0xc000) {
         return I->mem[addr - 0xa000 + I->ram_bank * 0x2000];
     }
 
-    // Reading $c000 - $cfff reads from video RAM
-    if (addr < 0xd000) {
-        return I->vram[addr - 0xc000];
+    // $c000 - $c7ff is background tilemap
+    else if (addr < 0xc800) {
+        return I->ppu->bg_map_data[addr - 0xc000];
+    }
+    // $c800 - $cfff is foreground tilemap
+    else if (addr < 0xd000) {
+        return I->ppu->fg_map_data[addr - 0xc800];
+    }
+    // $d000 - $c3ff is OAM
+    else if (addr < 0xd400) {
+        return I->ppu->oam[addr - 0xd000];
+    }
+    // $d400 - $d47f is palette data
+    else if (addr < 0xd500) {
+        return I->ppu->palette_data[addr - 0xd400];
+    }
+    // $d500 - $d57f is 128 bytes of the low half of the
+    // pattern table at offset [$cffb] * 32
+    else if (addr < 0xd580) {
+        return I->ppu->pattern_table[I->ppu->pattern_offset * 32 + addr - 0xd500];
+    }
+    // $d580 - $d5ff is 128 bytes of the high half of the
+    // pattern table at offset [$cffb] * 32
+    else if (addr < 0xd5ff) {
+        return I->ppu->pattern_table[(I->ppu->pattern_offset * 32
+                                        + addr - 0xd580 + 8192) & 0x10000];
+    }
+    // $d600 - $d7f8 is currently unused, but reserved
+    else if (addr < 0xd7f9) {
+        /* nothing happens */
+        printf("Unimplemented reading from %04X\n", addr);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
+        return 0;
+    }
+    // $d7f9 is the pattern table offset value
+    else if (addr == 0xd7f9) {
+        return I->ppu->pattern_offset;
+    }
+    // $d7fa is the BG layer's horizontal offset (signed)
+    else if (addr == 0xd7fa) {
+        return I->ppu->bg_h_offset;
+    }
+    // $d7fb is the BG layer's vertical offset (signed)
+    else if (addr == 0xd7fb) {
+        return I->ppu->bg_v_offset;
+    }
+    // $d7fc is the FG layer's horizontal offset (signed)
+    else if (addr == 0xd7fc) {
+        return I->ppu->fg_h_offset;
+    }
+    // $d7fd is the FG layer's vertical offset (signed)
+    else if (addr == 0xd7fd) {
+        return I->ppu->fg_v_offset;
+    }
+    // $d7fe is the sprite layer's horizontal offset (signed)
+    else if (addr == 0xd7fe) {
+        return I->ppu->sprite_h_offset;
+    }
+    // $d7ff is the sprite layer's vertical offset (signed)
+    else if (addr == 0xd7ff) {
+        return I->ppu->sprite_v_offset;
     }
 
-    printf("Unimplemented reading from thing!\n");
-    return 0;
+    // magic addresses 0xfd00+
+    else if (addr == 0xfd00) {
+        return I->rom_bank;
+    }
+
+    else if (addr == 0xfd01) {
+        return I->ram_bank;
+    }
+
+    else {
+        printf("Unimplemented reading from %04X\n", addr);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
+        return 0;
+    }
 }
 
 void store_word(interp *I, u16 addr, u16 value) {
     if (addr % 2 == 1) {
         fprintf(stderr, "Unaligned word write to $%04X (pc: $%04X)\n", addr, I->pc);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
         return;
     }
 
@@ -233,6 +461,9 @@ void store_word(interp *I, u16 addr, u16 value) {
 u16 load_word(interp *I, u16 addr) {
     if (addr % 2 == 1) {
         fprintf(stderr, "Unaligned word read at $%04X (pc: $%04X)\n", addr, I->pc);
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
         return 0;
     }
 
@@ -254,6 +485,9 @@ int main (int argc, char **argv) {
     }
 
     interp I;
+    ppu P;
+    init_ppu(&P);
+    I.ppu = &P;
     I.flags = RUN_FLAG | INTERRUPT_ENABLE;
 
     // program starts at 0x0100, after a 256-byte header
@@ -262,6 +496,11 @@ int main (int argc, char **argv) {
     // stack starts at 0x9ffe so it's always available
     // and not in a bank that might get swapped out
     I.sp = 0x9ffe;
+
+    // all other registers start at 0
+    I.a = I.b = I.c = I.d = I.e = I.f
+        = I.g = I.h = I.i = I.j = I.k
+        = I.l = I.m = I.n = 0;
 
     FILE *rom = fopen(argv[1], "rb");
 
@@ -287,7 +526,11 @@ int main (int argc, char **argv) {
                 I.flags &= ~RUN_FLAG;
             }
         }
+#ifdef DEBUG
+        if (SDL_GetTicks() - time >= (debug_counter ? 17 : 2000)) {
+#else
         if (SDL_GetTicks() - time >= 17) {
+#endif
             draw(&I);
             time = SDL_GetTicks();
             // vblank interrupt
@@ -297,7 +540,49 @@ int main (int argc, char **argv) {
             I.flags &= ~INTERRUPT_ENABLE_NEXT;
             I.flags |= INTERRUPT_ENABLE;
         }
-        do_instr(&I);
+        if (!(I.flags & WAIT_FLAG)) {
+            do_instr(&I);
+#ifdef DEBUG
+            if (debug_counter > 0) debug_counter --;
+            instr_counter ++;
+            if (debug_counter == 0) {
+                char cmd[20] = "1";
+                int cont = 0;
+                while (!cont) {
+                    cmd[0] = '\0';
+                    printf("debugger[%d]> ", instr_counter);
+                    fgets(cmd, 20, stdin);
+                    if (strlen(cmd) == 1 || !strcmp(cmd, "cont\n")) {
+                        cont = 1;
+                    } else if (!strcmp(cmd, "run\n") || !strcmp(cmd, "r")) {
+                        debug_counter = -1;
+                        cont = 1;
+                    } else if (strlen(cmd) == 0 || !strcmp(cmd, "exit\n") || !strcmp(cmd, "q")) {
+                        I.flags &= ~RUN_FLAG;
+                        cont = 1;
+                    } else if (!strcmp(cmd, "state\n") || !strcmp(cmd, "s")) {
+                        printf("==== STATE ====\n");
+                        printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
+                        printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
+                        printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
+                        printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
+                    } else if (atoi(cmd) >= 0) {
+                        debug_counter = atoi(cmd);
+                        cont = 1;
+                    } else if (!strcmp(cmd, "help\n")) {
+                        printf("* Press enter or type \"cont\" to advance one instruction\n");
+                        printf("* Type \"state\" or \"s\" to print register state\n");
+                        printf("* Type \"run\" or \"r\" to make it run normally\n");
+                        printf("* Type a number to run normally for that many instructions\n");
+                        printf("* Type \"exit\" or \"q\" to end the program\n");
+                        printf("  (You can also quit by pressing Control-D.)\n");
+                    } else {
+                        printf("Unknown debugger command\n");
+                    }
+                }
+            }
+#endif
+        }
     }
 
     printf("==== FINAL STATE ====\n");
@@ -318,7 +603,9 @@ void do_instr(interp *I) {
     // first 4 bits are the opcode
     u16 instrtype = srl(instr, 12) & 0xf;
 
-    //printf("Instruction @ 0x%04X: 0x%04X\n", I->pc, instr);
+#ifdef DEBUG
+    printf("Instruction @ 0x%04X: 0x%04X\n", I->pc, instr);
+#endif
 
     int ok = 0;
 
@@ -340,6 +627,10 @@ void do_instr(interp *I) {
             } else if (rest == 0x01) {
                 // 0x0001 = NOP
                 ok = 1;
+            } else if (rest == 0x02) {
+                // 0x0001 = HALT
+                I->flags |= WAIT_FLAG;
+                ok = 1;
             } else if (rest == 0xaa) {
                 // 0x00aa = RETURN
                 // pops return address off stack and jumps to it
@@ -355,16 +646,18 @@ void do_instr(interp *I) {
                 u16 retaddr = load_word(I, I->sp);
                 I->sp += 2;
                 I->pc = retaddr;
-                I->flags |= INTERRUPT_ENABLE;
+                I->flags |= INTERRUPT_ENABLE_NEXT;
                 // don't increase pc
                 pc_increment = 0;
                 ok = 1;
             } else if (rest == 0xdd) {
-                // 0x00ee = disable interrupts
+                // 0x00dd = disable interrupts
                 I->flags &= ~INTERRUPT_ENABLE;
+                ok = 1;
             } else if (rest == 0xee) {
                 // 0x00ee = enable interrupts
                 I->flags |= INTERRUPT_ENABLE_NEXT;
+                ok = 1;
             }
         } else if (subcode == 1) {
             // PUSH
@@ -554,7 +847,6 @@ void do_instr(interp *I) {
             *dest -= srcval + carry;
         } else if (op == 0x18) {
             // Multiply with carry
-            // TODO maybe we want to have a full carry register...
             if ((u32)*dest * (u32)srcval + carry > 0xFFFF) {
                 I->flags |= CARRY_FLAG;
             }
@@ -615,11 +907,17 @@ void do_instr(interp *I) {
             default: fprintf(stderr, "Unknown jump condition %d\n", op);
         }
 
+        //if (op != 0 && op != 15) printf("jump type: %d; should jump? %d\n", op, should_jump);
+
         if (should_jump) {
-            if (op == 7) {
+            if (op == 15) {
                 // push return address for subroutine call
                 I->sp -= 2;
-                store_word(I, I->sp, I->pc + 2);
+                if (offset == 0) {
+                    store_word(I, I->sp, I->pc + 4);
+                } else {
+                    store_word(I, I->sp, I->pc + 2);
+                }
             }
 
             if (offset != 0) {
@@ -686,28 +984,44 @@ void do_instr(interp *I) {
         if (op == 0) {
             // Load word
             *reg = load_word(I, addr);
+            //printf("Load word at $%04X: $%04X\n", addr, *reg);
         } else if (op == 1) {
             // Load byte
             *reg = load_byte(I, addr);
+            //printf("Load byte at $%04X: $%02X\n", addr, *reg);
         } else if (op == 2) {
             // Store word
             store_word(I, addr, *reg);
+            //printf("Store word $%04X at $%04X\n", *reg, addr);
         } else if (op == 3) {
             // Store byte
             store_byte(I, addr, (*reg) & 0xff);
+            //printf("Store byte $%02X at $%04X\n", *reg, addr);
         }
     }
     /* unused instruction space: prefix 0001 isn't anything */
 
     if (!ok) {
         // TODO put up a dialogue box or something on error! jeez, rude
-        printf("Unknown opcode: 0x%X\n", instr);
+        printf("Unknown opcode: $%X at PC $%X\n", instr, I->pc);
+#ifdef DEBUG
+        debug_counter = 0;
+#else
         // crash :(
         I->flags &= ~RUN_FLAG;
         I->flags |= CRASH_FLAG;
+#endif
     } else {
         I->pc += pc_increment;
     }
+
+    /*if (instr != 0x01 && (instr & 0xfc00) != 0x4000) {
+        printf("Instr: $%04X\n", instr);
+        printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I->a, I->b, I->c, I->d);
+        printf("     e: %04X f: %04X g: %04X h: %04X\n", I->e, I->f, I->g, I->h);
+        printf("     i: %04X j: %04X k: %04X l: %04X\n", I->i, I->j, I->k, I->l);
+        printf("     m: %04X n: %04X SP %04X PC %04X\n", I->m, I->n, I->sp, I->pc);
+    }*/
 }
 
 void interrupt(interp *I, u16 addr) {
@@ -720,14 +1034,22 @@ void interrupt(interp *I, u16 addr) {
     }
     I->sp -= 2;
     store_word(I, I->sp, I->pc);
-    I->flags |= ~INTERRUPT_ENABLE;
+    I->flags &= ~INTERRUPT_ENABLE;
+    I->flags &= ~WAIT_FLAG;
     I->pc = addr;
-    //printf("Interrupted! pc: %04X\n", I->pc);
 }
 
 int init_draw() {
     window = NULL;
     screen = NULL;
+
+    if (widescreen) {
+        SCRW = 240;
+        SCRH = 136;
+    } else {
+        SCRW = 240;
+        SCRH = 180;
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "Failed to initialize SDL. :(\n");
@@ -737,21 +1059,212 @@ int init_draw() {
     window = SDL_CreateWindow("VSI-16",
                               SDL_WINDOWPOS_UNDEFINED,
                               SDL_WINDOWPOS_UNDEFINED,
-                              SCRW, SCRH,
+                              SCRW * SCALE, SCRH * SCALE,
                               SDL_WINDOW_SHOWN);
 
     screen = SDL_GetWindowSurface(window);
+
+    SDL_RenderSetLogicalSize(SDL_GetRenderer(window), SCRW, SCRH);
 
     if (!window) {
         fprintf(stderr, "Failed to create window: %s\n", SDL_GetError());
         return 0;
     }
 
+    renderer = SDL_CreateRenderer(window, -1, 0);
+
+    if (!renderer) {
+        fprintf(stderr, "Failed to create renderer: %s\n", SDL_GetError());
+        return 0;
+    }
+
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                SDL_TEXTUREACCESS_TARGET, SCRW, SCRH);
+
+    if (!texture) {
+        fprintf(stderr, "Failed to create texture: %s\n", SDL_GetError());
+        return 0;
+    }
+
     return 1;
 }
 
+u32 get_palette_color(u16 color) {
+    // Convert 15-bit color to 24-bit color
+    u32 r = (color >> 10) & 0x1f;
+    u32 g = (color >>  5) & 0x1f;
+    u32 b = (color >>  0) & 0x1f;
+
+    r = r * 255 / 31;
+    g = g * 255 / 31;
+    b = b * 255 / 31;
+
+    return (r << 16) | (g << 8) | b;
+}
+
+void scanline(interp *I, int line_num) {
+    u32 tile_palettes[8][8];
+    u32 sprite_palettes[8][8];
+
+    u32 line_colors[SCRW];
+    u8  line_priorities[SCRW];
+
+    for (int pal = 0; pal < 8; pal++) {
+        for (int i = 0; i < 8; i++) {
+            u8 pal_color_hi = I->ppu->palette_data[pal * 16 + i * 2];
+            u8 pal_color_lo = I->ppu->palette_data[pal * 16 + i * 2 + 1];
+            u16 pal_color = (pal_color_hi << 8) | pal_color_lo;
+            sprite_palettes[pal][i] = get_palette_color(pal_color);
+        }
+    }
+
+    for (int pal = 0; pal < 8; pal++) {
+        for (int i = 0; i < 8; i++) {
+            u8 pal_color_hi = I->ppu->palette_data[128 + pal * 16 + i * 2];
+            u8 pal_color_lo = I->ppu->palette_data[128 + pal * 16 + i * 2 + 1];
+            u16 pal_color = (pal_color_hi << 8) | pal_color_lo;
+            tile_palettes[pal][i] = get_palette_color(pal_color);
+        }
+    }
+
+    for (int i = 0; i < SCRW; i++) {
+        // Default background color
+        line_colors[i] = tile_palettes[0][0];
+        line_priorities[i] = 0;
+    }
+
+    int row_width = 32;
+    // Which row of tiles are we drawing?
+    int row_num = (((line_num + I->ppu->bg_v_offset) / 8) % 32 + 32) % 32;
+    // Which row of that row are we drawing? (i.e. y=0-7)
+    u8 tile_row = ((line_num + I->ppu->bg_v_offset) % 8 + 8) % 8;
+
+    for (int t = 0; t < row_width; t++) {
+        u8 info = I->ppu->bg_map_data[row_num * row_width + t * 2];
+        u8 idx  = I->ppu->bg_map_data[row_num * row_width + t * 2 + 1];
+
+        if (info & 0x1) idx += 256;
+
+        u8 palette = (info & 0xe0) >> 5;
+
+        // get the appropriate row of the tile (4 bytes)
+        u8 *tile_bytes = &I->ppu->pattern_table[idx + tile_row * 4];
+
+        int x = t * 8 - I->ppu->bg_h_offset;
+
+        for (int i = 0; i < 4; i++) {
+            u8 c0 = (tile_bytes[i] >> 4) & 0x7;
+            u8 c1 = (tile_bytes[i] >> 0) & 0x7;
+
+            u8 p0 = ((tile_bytes[i] >> 7) & 0x1) ? 2 : 0;
+            u8 p1 = ((tile_bytes[i] >> 3) & 0x1) ? 2 : 0;
+
+            u8 x0 = (x + i * 2) % 256;
+            u8 x1 = (x + i * 2 + 1) % 256;
+
+            if (x0 >= 0 && x0 < SCRW && c0 != 0) {
+                line_colors[x0] = tile_palettes[palette][c0];
+                line_priorities[x0] = p0;
+            }
+
+            if (x1 >= 0 && x1 < SCRW && c1 != 0) {
+                line_colors[x1] = tile_palettes[palette][c1];
+                line_priorities[x1] = p1;
+            }
+        }
+    }
+
+    for (int spr = 0; spr < 256; spr++) {
+        u8 info = I->ppu->oam[spr * 4];
+        u8 idx = I->ppu->oam[spr * 4 + 1];
+
+        u8 x = I->ppu->oam[spr * 4 + 2] - I->ppu->sprite_h_offset;
+        u8 y = I->ppu->oam[spr * 4 + 3] - I->ppu->sprite_v_offset;
+
+        if (info & 0x1) idx += 256; // high half of table
+
+        u8 sprite_size = (info & 0x2) ? 16 : 8; // 16px sprite flag
+        // TODO actually handle 16px sprites
+        u8 palette = (info & 0xe0) >> 5;
+
+        u8 sprite_row = (((line_num - y) % 256) + 256) % 256;
+        if (sprite_row > sprite_size) {
+            continue;
+        }
+
+        u8 *sprite_bytes; // get the appropriate row of the sprite (4 bytes)
+        sprite_bytes = &I->ppu->pattern_table[idx + sprite_row * 4];
+
+        for (int i = 0; i < 4; i++) {
+            u8 c0 = (sprite_bytes[i] >> 4) & 0x7;
+            u8 c1 = (sprite_bytes[i] >> 0) & 0x7;
+
+            u8 p0 = ((sprite_bytes[i] >> 7) & 0x1) ? 3 : 1;
+            u8 p1 = ((sprite_bytes[i] >> 3) & 0x1) ? 3 : 1;
+
+            u8 x0 = (x + i * 2) % 256;
+            u8 x1 = (x + i * 2 + 1) % 256;
+
+            if (x0 >= 0 && x0 < SCRW && c0 != 0 && p0 > line_priorities[x0]) {
+                line_colors[x0] = sprite_palettes[palette][c0];
+                line_priorities[x0] = p0;
+            }
+
+            if (x1 >= 0 && x1 < SCRW && c1 != 0 && p1 > line_priorities[x1]) {
+                line_colors[x1] = sprite_palettes[palette][c1];
+                line_priorities[x1] = p1;
+            }
+        }
+    }
+
+    for (int i = 0; i < SCRW; i++) {
+        //printf("%d: %8X\n", i, line_colors[i]);
+        u8 r = (line_colors[i] >> 16) & 0xff;
+        u8 g = (line_colors[i] >>  8) & 0xff;
+        u8 b = (line_colors[i] >>  0) & 0xff;
+        SDL_SetRenderDrawColor(renderer, r, g, b, 255);
+        SDL_RenderDrawPoint(renderer, i, line_num);
+    }
+}
+
 void draw(interp *I) {
-    //printf("Draw! [ %02X, %02X, %02X ]\n", I->vram[0], I->vram[1], I->vram[2]);
-    SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, I->vram[0], I->vram[1], I->vram[2]));
-    SDL_UpdateWindowSurface(window);
+    SDL_SetRenderTarget(renderer, texture);
+    SDL_RenderClear(renderer);
+
+    for (int y = 0; y < SCRH; y++) {
+        scanline(I, y);
+    }
+    SDL_SetRenderTarget(renderer, NULL);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderPresent(renderer);
+
+    //SDL_UpdateWindowSurface(window);
+}
+
+void init_ppu(ppu *p) {
+    p->sprite_h_offset = 0;
+    p->sprite_v_offset = 0;
+    p->bg_h_offset = 0;
+    p->bg_v_offset = 0;
+    p->fg_h_offset = 0;
+    p->fg_v_offset = 0;
+
+    for (int i = 0; i < 256; i++) {
+        p->palette_data[i] = 0;
+    }
+
+    for (int i = 0; i < 2048; i++) {
+        p->bg_map_data[i] = 0;
+        p->fg_map_data[i] = 0;
+    }
+
+    for (int i = 0; i < 1024; i++) {
+        p->oam[i] = 0;
+    }
+
+    p->pattern_offset = 0;
+
+    for (int i = 0; i < 16384; i++) {
+        p->pattern_table[i] = 0;
+    }
 }

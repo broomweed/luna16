@@ -38,6 +38,10 @@ def p_line_directive(p):
     '''line : directive EOL'''
     p[0] = (p.lineno(2), *p[1])
 
+def p_line_data(p):
+    '''line : datadecl EOL'''
+    p[0] = p[1]
+
 def p_params_single(p):
     '''params : param'''
     p[0] = [ p[1] ]
@@ -55,8 +59,12 @@ def p_param_mem(p):
     p[0] = ('ref', p[2], 0)
 
 def p_param_memoffset(p):
-    '''param : NUMBER OPENBRACKET NAME CLOSEBRACKET'''
-    p[0] = ('ref', p[3], p[1])
+    '''param : NUMBER OPENBRACKET REG CLOSEBRACKET'''
+    p[0] = ('ref', ('reg', p[3]), p[1])
+
+def p_param_memoffsetname(p):
+    '''param : NAME OPENBRACKET REG CLOSEBRACKET'''
+    p[0] = ('ref', ('reg', p[3]), p[1])
 
 def p_simpleparam_number(p):
     '''simpleparam : NUMBER'''
@@ -94,10 +102,16 @@ def p_dirparam_str(p):
     '''dirparam : STRING'''
     p[0] = ('str', p[1])
 
+def p_datadecl(p):
+    '''datadecl : DATA dirparams'''
+    p[0] = (p.lineno(1), 'data', p[2])
+
 def p_error(p):
-    print("Error at token", p.type)
     if not p:
         print("unexpected end of file while parsing!")
+        return
+    else:
+        print("Syntax error at token", p.value, "on line", p.lineno)
 
     # read to next EOL token - fortunately our syntax is simple!
     while True:

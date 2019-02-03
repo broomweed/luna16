@@ -2,7 +2,11 @@ from assemlex import lexer
 from assemparse import parser
 import sys
 
+verbose = False
+
 instr_table = {}
+
+lineno = 0
 
 reg_table = {
     'a':  0,  'b':  1,  'c':  2,  'd':  3,
@@ -43,6 +47,10 @@ def i_stop():
 def i_nop():
     return bytes([0x00, 0x01])
 
+@table('halt')
+def i_nop():
+    return bytes([0x00, 0x02])
+
 @table('ret')
 def i_ret():
     return bytes([0x00, 0xaa])
@@ -58,6 +66,11 @@ def i_di():
 @table('ei')
 def i_ei():
     return bytes([0x00, 0xee])
+
+@table('data')
+def i_data(*data):
+    result = bytes()
+    return bytes(data)
 
 @table('push')
 def i_push(reg):
@@ -105,11 +118,17 @@ def gen_arith(code):
             else:
                 # Big immediate operand
                 yyyyyy = 0x20
+            imm = src
+        if type(src) == str:
+            # Label (or macro but we don't have them yet!)
+            yyyyyy = 0x20
+            imm = 0
+            jump_list.append((lineno, fragment_id, current_position + 2, src))
 
         result = bytes([ 0x80 | (code << 2) | xx1, (xx2 << 6) | yyyyyy ])
 
         if yyyyyy == 0x20:
-            result += bytes([ (src & 0xff00) >> 8, src & 0x00ff ])
+            result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
 
         return result
 
@@ -164,153 +183,73 @@ instr_table['mulc'] = gen_arith(0x18)
 instr_table['cmp']  = gen_arith(0x1e)
 instr_table['cmps'] = gen_arith(0x1f)
 
-@table('lw')
-def i_lw(dest, src):
-    if type(src) != tuple or src[0] != 'ref':
-        raise AssembleError(
-            'source operand of LW must be a memory location'
-        )
-
-    _, origin, offset = src
-
-    if type(dest) != tuple or dest[0] != 'reg':
-        raise AssembleError(
-            'destination operand of LW must be a register'
-        )
-
-    xxxx = get_reg(dest)
-
-    xxx = xxxx >> 1
-    x = xxxx & 1
-
-    if type(origin) == tuple and origin[0] == 'reg':
-        imm = offset
-        yyyyyy = get_reg(origin)
-        if offset != 0:
-            yyyyyy &= 0x10
-
-    elif type(origin) == int:
-        imm = origin
-        yyyyyy = 0x20
-
-    result = bytes([ 0x20 | xxx, (x << 7) | yyyyyy ])
-
-    if imm != 0:
-        result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
-
-    return result
-
-@table('lb')
-def i_lb(dest, src):
-    if type(src) != tuple or src[0] != 'ref':
-        raise AssembleError(
-            'source operand of LB must be a memory location'
-        )
-
-    _, origin, offset = src
-
-    if type(dest) != tuple or dest[0] != 'reg':
-        raise AssembleError(
-            'destination operand of LB must be a register'
-        )
-
-    xxxx = get_reg(dest)
-
-    xxx = xxxx >> 1
-    x = xxxx & 1
-
-    if type(origin) == tuple and origin[0] == 'reg':
-        imm = offset
-        yyyyyy = get_reg(origin)
-        if offset != 0:
-            yyyyyy &= 0x10
-
-    elif type(origin) == int:
-        imm = origin
-        yyyyyy = 0x20
-
-    result = bytes([ 0x28 | xxx, (x << 7) | yyyyyy ])
-
-    if imm != 0:
-        result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
-
-    return result
-
-@table('sw')
-def i_sw(dest, src):
-    if type(src) != tuple or src[0] != 'reg':
-        raise AssembleError(
-            'source operand of SW must be a register'
-        )
-
-    xxxx = get_reg(src)
-
-    xxx = xxxx >> 1
-    x = xxxx & 1
-
-    if type(dest) != tuple or dest[0] != 'ref':
-        raise AssembleError(
-            'destination operand of SW must be a memory location'
-        )
-
-    _, origin, offset = dest
-
-    if type(origin) == tuple and origin[0] == 'reg':
-        imm = offset
-        yyyyyy = get_reg(origin)
-        if offset != 0:
-            yyyyyy &= 0x10
-    elif type(origin) == int:
-        imm = origin
-        yyyyyy = 0x20
-
-    result = bytes([ 0x30 | xxx, (x << 7) | yyyyyy ])
-
-    if imm != 0:
-        result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
-
-    return result
-
-@table('sb')
-def i_sb(dest, src):
-    if type(src) != tuple or src[0] != 'reg':
-        raise AssembleError(
-            'source operand of SB must be a register'
-        )
-
-    xxxx = get_reg(src)
-
-    xxx = xxxx >> 1
-    x = xxxx & 1
-
-    if type(dest) != tuple or dest[0] != 'ref':
-        raise AssembleError(
-            'destination operand of SB must be a memory location'
-        )
-
-    _, origin, offset = dest
-
-    if type(origin) == tuple and origin[0] == 'reg':
-        if offset == 0:
-            imm = 0
-            yyyyyy = get_reg(origin)
+def gen_loadstore(name, code, is_load):
+    def inner(reg, mem):
+        if is_load:
+            mem_param = 'source'
+            reg_param = 'destination'
         else:
-            imm = offset
-            yyyyyy = get_reg(origin) & 0x10
-    elif type(origin) == int:
-        imm = origin
-        yyyyyy = 0x20
+            mem_param = 'destination'
+            reg_param = 'source'
+            reg, mem = mem, reg
 
-    result = bytes([ 0x38 | xxx, (x << 7) | yyyyyy ])
+        if type(mem) != tuple or mem[0] != 'ref':
+            raise AssembleError(
+                mem_param + ' operand of ' + name.upper() + ' must be a memory location'
+            )
 
-    if imm != 0:
-        result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
+        _, origin, offset = mem
 
-    return result
+        if type(reg) != tuple or reg[0] != 'reg':
+            raise AssembleError(
+                reg_param + ' operand of ' + name.upper() + ' must be a register'
+            )
+
+        xxxx = get_reg(reg)
+
+        xxx = xxxx >> 1
+        x = xxxx & 1
+
+        if type(origin) == tuple and origin[0] == 'reg':
+            if type(offset) == int:
+                imm = offset
+                yyyyyy = get_reg(origin)
+                if offset != 0:
+                    yyyyyy |= 0x10
+            elif type(offset) == str:
+                imm = -1
+                yyyyyy = get_reg(origin) | 0x10
+                jump_list.append((lineno, fragment_id, current_position + 2, offset))
+
+        elif type(origin) == int:
+            imm = origin
+            yyyyyy = 0x20
+
+        elif type(origin) == str:
+            imm = -1
+            yyyyyy = 0x20
+            jump_list.append((lineno, fragment_id, current_position + 2, origin))
+
+        else:
+            raise AssembleError("Unknown parameter to " + name.upper() + ":", repr(origin))
+
+        result = bytes([ code | xxx, (x << 7) | yyyyyy ])
+
+        if imm != 0:
+            result += bytes([ (imm & 0xff00) >> 8, imm & 0x00ff ])
+
+        return result
+
+    return inner
+
+instr_table['lw'] = gen_loadstore('lw', 0x20, True)
+instr_table['lb'] = gen_loadstore('lb', 0x28, True)
+instr_table['sw'] = gen_loadstore('sw', 0x30, False)
+instr_table['sb'] = gen_loadstore('sb', 0x38, False)
 
 def gen_jump(code):
     def inner(where):
-        jump_list.append((fragment_id, current_position, where))
+        jump_list.append((lineno, fragment_id, current_position + 2, where))
         return bytes([ 0x40 | (code << 2), 0x00, 0x00, 0x00 ])
     return inner
 
@@ -410,7 +349,7 @@ if __name__ == "__main__":
 
     ast = parser.parse("".join(source_lines), lexer=lexer)
 
-    print("\n".join([str(x) for x in ast]))
+    if verbose: print("\n".join([str(x) for x in ast]))
 
     if len(sys.argv) < 3:
         outfilename = "a.out"
@@ -440,6 +379,8 @@ if __name__ == "__main__":
 
         print("Assembling...")
 
+        errors = 0
+
         for line in ast:
             lineno, instr, args = line
 
@@ -453,15 +394,19 @@ if __name__ == "__main__":
                     except KeyError:
                         raise AssembleError("unknown instruction '%s'" % instr)
                     ba += opcode
-                    print(" ".join("%X" % x for x in opcode))
+                    if verbose: print(" ".join("%X" % x for x in opcode))
                     current_position += len(opcode)
                 else:
                     label_table[args] = (fragment_id, current_position)
             except AssembleError as e:
                 print("Error at " + sys.argv[1] + " line %d:" % lineno, str(e))
                 print("    > ", source_lines[lineno - 1].strip())
+                errors += 1
 
         end_section()
+
+        if errors > 0:
+            sys.exit(1)
 
         print("Placing fragments...")
 
@@ -533,9 +478,10 @@ if __name__ == "__main__":
                 layout.append(frag)
 
 
-            print("Inserted fragment %s, layout now:" % frag['name'],
-                [f if type(f) == int else f['name'] for f in layout]
-            )
+            if verbose:
+                print("Inserted fragment %s, layout now:" % frag['name'],
+                    [f if type(f) == int else f['name'] for f in layout]
+                )
 
         if overlaps > 0:
             sys.exit(1)
@@ -567,14 +513,16 @@ if __name__ == "__main__":
                 frag['offset'] = byte_offset
                 layout.append(frag)
 
-            print("Inserted fragment %s, layout now:" % frag['name'],
-                [f if type(f) == int else f['name'] for f in layout]
-            )
+            if verbose:
+                print("Inserted fragment %s, layout now:" % frag['name'],
+                    [f if type(f) == int else f['name'] for f in layout]
+                )
 
-        # TODO temporarily not resolving jumps for a sec here
-        print("Resolving jumps...")
+        print("Resolving labels...")
 
-        for (frag_id, jump_from, label) in jump_list:
+        jump_errors = 0
+
+        for (lineno, frag_id, jump_from, label) in jump_list:
             # NOTE: The current jump implementation is inefficient;
             # it never uses relative jumps. I'm not smart enough to
             # figure out when to use a short jump, since that moves
@@ -589,10 +537,21 @@ if __name__ == "__main__":
             # version.
 
             # Add address for absolute jump
-            fragment, offset = label_table[label]
+            try:
+                fragment, offset = label_table[label]
+            except KeyError:
+                print("Error at %s line %d: no such label %s"
+                                      % (sys.argv[1], lineno, label))
+                print("    > ", source_lines[lineno - 1].strip())
+                jump_errors += 1
+                continue
+
             jump_to = fragments[fragment]['offset'] + offset
-            fragments[frag_id]['data'][jump_from+2:jump_from+4] \
+            fragments[frag_id]['data'][jump_from:jump_from+2] \
                                 = bytes([jump_to >> 8, jump_to & 0xff])
+
+        if jump_errors > 0:
+            sys.exit(1)
 
         # Now put together the whole thing
         arr = bytearray()
@@ -603,3 +562,5 @@ if __name__ == "__main__":
                 arr += fragment['data']
 
         outfile.write(arr)
+
+        print("Success! Output to", outfilename)

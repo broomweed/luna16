@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -O2
+CFLAGS=-Wall -g
 LIBS=-lSDL2
 
 test: main.o
