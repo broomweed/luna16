@@ -21,6 +21,7 @@
 
 #define VBLANK_INTERRUPT 0x80
 #define HBLANK_INTERRUPT 0x88
+#define KEYBOARD_INTERRUPT 0x90
 
 //#define DEBUG
 
@@ -51,6 +52,11 @@ int SCRW;
 int SCRH;
 
 char rom_title[31];
+
+// if we fail to do the key interrupt once because
+// we're already in an interrupt, store it here for a sec
+// and try again
+u8 backup_key = 0xFF;
 
 // uh, this can be arbitrarily big I guess
 // I'll probably heap-allocate this later
@@ -103,6 +109,9 @@ typedef struct interp {
     // 64k of sweet sweet RAM
     u8 mem[65536];
 
+    // Last keyboard button pressed
+    u8 last_key;
+
     struct ppu *ppu;
 } interp;
 
@@ -144,10 +153,10 @@ typedef struct ppu {
     // 4 bytes per sprite:
     // %ppplhvsn %iiiiiiii %xxxxxxxx %yyyyyyyy
     // p = palette; i = sprite index; x,y = coords
-    // n = high/low half of pattern table
     // l = layer (if 1, show above fg map)
     // h,v = horizontal/vertical flip
     // s = size (if 1, 16x16 else 8x8)
+    // n = high/low half of pattern table
     // 256 sprites on screen max. 256 x 4 = 1K
     u8 oam[1024];
     //
@@ -168,12 +177,14 @@ typedef struct ppu {
 
 void do_instr(interp *I);
 
-void interrupt(interp *I, u16 addr);
+int interrupt(interp *I, u16 addr);
 
 void init_ppu(ppu *p);
 
 int init_draw();
 void draw(interp *I);
+
+void handle_keydown(interp *I, SDL_KeyboardEvent key);
 
 void insert_string(u8 *mem, u16 offset, int length, char *str) {
     int i = 0;
@@ -264,6 +275,7 @@ void store_byte(interp *I, u16 addr, u8 value) {
     }
     // $d000 - $d3ff is OAM
     else if (addr < 0xd400) {
+        printf("Wrote to oam\n");
         I->ppu->oam[addr - 0xd000] = value;
     }
     // $d400 - $d4ff is palette data
@@ -318,14 +330,23 @@ void store_byte(interp *I, u16 addr, u8 value) {
         I->ppu->sprite_v_offset = value;
     }
 
-    // 0xfd00+ = magic addresses
-    else if (addr == 0xfd00) {
+    // 0xff00+ = magic addresses
+    else if (addr == 0xff00) {
         I->rom_bank = value;
     }
 
-    else if (addr == 0xfd01) {
+    else if (addr == 0xff01) {
         I->ram_bank = value;
     }
+
+    else if (addr == 0xff02) {
+        /* doesn't do anything */
+        printf("Attempted write to read-only HW register $FF02 (keyboard key)\n");
+#ifdef DEBUG
+        debug_counter = 0;
+#endif
+    }
+
 
     else {
         printf("Unimplemented writing to %04X\n", addr);
@@ -421,13 +442,17 @@ u8 load_byte(interp *I, u16 addr) {
         return I->ppu->sprite_v_offset;
     }
 
-    // magic addresses 0xfd00+
-    else if (addr == 0xfd00) {
+    // magic addresses 0xff00+
+    else if (addr == 0xff00) {
         return I->rom_bank;
     }
 
-    else if (addr == 0xfd01) {
+    else if (addr == 0xff01) {
         return I->ram_bank;
+    }
+
+    else if (addr == 0xff02) {
+        return I->last_key;
     }
 
     else {
@@ -484,6 +509,7 @@ int main (int argc, char **argv) {
     interp I;
     ppu P;
     init_ppu(&P);
+
     I.ppu = &P;
     I.flags = RUN_FLAG | INTERRUPT_ENABLE;
 
@@ -521,6 +547,10 @@ int main (int argc, char **argv) {
             // otherwise infinite loops become terrible
             if (event.type == SDL_QUIT) {
                 I.flags &= ~RUN_FLAG;
+            } else if (event.type == SDL_KEYDOWN) {
+                // Later we'll have a 'controller mode' as well.
+                // For now, we just have a keyboard.
+                handle_keydown(&I, event.key);
             }
         }
 #ifdef DEBUG
@@ -537,42 +567,49 @@ int main (int argc, char **argv) {
             I.flags &= ~INTERRUPT_ENABLE_NEXT;
             I.flags |= INTERRUPT_ENABLE;
         }
+        if (backup_key != 0xff) {
+            // Try again with the key code
+            I.last_key = backup_key;
+            if (interrupt(&I, KEYBOARD_INTERRUPT)) {
+                backup_key = 0xff;
+            }
+        }
         if (!(I.flags & WAIT_FLAG)) {
             do_instr(&I);
 #ifdef DEBUG
             if (debug_counter > 0) debug_counter --;
             instr_counter ++;
             if (debug_counter == 0) {
-                char cmd[20] = "1";
+                char cmd[20] = "";
                 int cont = 0;
                 while (!cont) {
                     cmd[0] = '\0';
                     printf("debugger[%d]> ", instr_counter);
                     fgets(cmd, 20, stdin);
-                    if (strlen(cmd) == 1 || !strcmp(cmd, "cont\n")) {
+                    if (!strcmp(cmd, "\n") || !strcmp(cmd, "cont\n")) {
                         cont = 1;
-                    } else if (!strcmp(cmd, "run\n") || !strcmp(cmd, "r")) {
+                    } else if (!strcmp(cmd, "run\n") || !strcmp(cmd, "r\n")) {
                         debug_counter = -1;
                         cont = 1;
-                    } else if (strlen(cmd) == 0 || !strcmp(cmd, "exit\n") || !strcmp(cmd, "q")) {
+                    } else if (strlen(cmd) == 0 || !strcmp(cmd, "exit\n") || !strcmp(cmd, "q\n")) {
                         I.flags &= ~RUN_FLAG;
                         cont = 1;
-                    } else if (!strcmp(cmd, "state\n") || !strcmp(cmd, "s")) {
+                    } else if (!strcmp(cmd, "state\n") || !strcmp(cmd, "s\n")) {
                         printf("==== STATE ====\n");
                         printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
                         printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
                         printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
                         printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
+                    } else if (!strcmp(cmd, "help\n")) {
+                        printf("* Press enter or type \"cont\" to advance one instruction.\n");
+                        printf("* Type \"state\" or \"s\" to print register state.\n");
+                        printf("* Type \"run\" or \"r\" to make it run normally.\n");
+                        printf("* Type a number to run normally for that many instructions.\n");
+                        printf("* Type \"exit\" or \"q\" to end the program.\n");
+                        printf("  (You can also quit by pressing Control-D.)\n");
                     } else if (atoi(cmd) >= 0) {
                         debug_counter = atoi(cmd);
                         cont = 1;
-                    } else if (!strcmp(cmd, "help\n")) {
-                        printf("* Press enter or type \"cont\" to advance one instruction\n");
-                        printf("* Type \"state\" or \"s\" to print register state\n");
-                        printf("* Type \"run\" or \"r\" to make it run normally\n");
-                        printf("* Type a number to run normally for that many instructions\n");
-                        printf("* Type \"exit\" or \"q\" to end the program\n");
-                        printf("  (You can also quit by pressing Control-D.)\n");
                     } else {
                         printf("Unknown debugger command\n");
                     }
@@ -625,7 +662,7 @@ void do_instr(interp *I) {
                 // 0x0001 = NOP
                 ok = 1;
             } else if (rest == 0x02) {
-                // 0x0001 = HALT
+                // 0x0002 = HALT
                 I->flags |= WAIT_FLAG;
                 ok = 1;
             } else if (rest == 0xaa) {
@@ -1033,19 +1070,20 @@ void do_instr(interp *I) {
     }*/
 }
 
-void interrupt(interp *I, u16 addr) {
+int interrupt(interp *I, u16 addr) {
     // Do an interrupt. Push the current pc to the stack,
     // disable interrupts, and jump to the specified address.
     // (But not if interrupts are disabled.)
     if (!(I->flags & INTERRUPT_ENABLE)) {
         printf("Interrupts disabled. :(\n");
-        return;
+        return 0;
     }
     I->sp -= 2;
     store_word(I, I->sp, I->pc);
     I->flags &= ~INTERRUPT_ENABLE;
     I->flags &= ~WAIT_FLAG;
     I->pc = addr;
+    return 1;
 }
 
 int init_draw() {
@@ -1065,7 +1103,7 @@ int init_draw() {
         return 0;
     }
 
-    window = SDL_CreateWindow("VSI-16",
+    window = SDL_CreateWindow("seagull-16",
                               SDL_WINDOWPOS_UNDEFINED,
                               SDL_WINDOWPOS_UNDEFINED,
                               SCRW * SCALE, SCRH * SCALE,
@@ -1096,6 +1134,137 @@ int init_draw() {
     }
 
     return 1;
+}
+
+void handle_keydown(interp *I, SDL_KeyboardEvent key) {
+    const u8 SHIFT = 1 << 6;
+    const u8 CTRL = 1 << 7;
+    u8 keycode = 0;
+    int do_interrupt = 1;
+    // bit 7 = control
+    // bit 6 = shift
+    // this leaves 64 unique characters
+    if (key.keysym.sym == SDLK_SPACE) {
+        // code 0 = space
+        keycode = 0;
+    } else if (key.keysym.sym >= 'a' && key.keysym.sym <= 'z') {
+        // code 1-26 = a-z
+        keycode = key.keysym.sym - 'a' + 1;
+    } else if (key.keysym.sym >= '0' && key.keysym.sym <= '9') {
+        // code 27-36 = 0-9
+        keycode = key.keysym.sym - '0' + 27;
+    } else switch (key.keysym.sym) {
+        case ',':
+            keycode = 37;
+            break;
+        case '<':
+            keycode = 37 | SHIFT;
+            break;
+        case '.':
+            keycode = 38;
+            break;
+        case '>':
+            keycode = 38 | SHIFT;
+            break;
+        case ';':
+            keycode = 39;
+            break;
+        case ':':
+            keycode = 39 | SHIFT;
+            break;
+        case '=':
+            keycode = 40;
+            break;
+        case '+':
+            keycode = 40 | SHIFT;
+            break;
+        case '/':
+            keycode = 41;
+            break;
+        case '?':
+            keycode = 41 | SHIFT;
+            break;
+        case '-':
+            keycode = 42;
+            break;
+        case '_':
+            keycode = 42 | SHIFT;
+            break;
+        case '\'':
+            keycode = 43;
+            break;
+        case '"':
+            keycode = 43 | SHIFT;
+            break;
+        case SDLK_UP:
+            keycode = 57;
+            break;
+        case SDLK_DOWN:
+            keycode = 58;
+            break;
+        case SDLK_LEFT:
+            keycode = 59;
+            break;
+        case SDLK_RIGHT:
+            keycode = 60;
+            break;
+        case SDLK_RETURN:
+            keycode = 61;
+            break;
+        case SDLK_BACKSPACE:
+            keycode = 62;
+            break;
+        case '!':
+            keycode = 28 | SHIFT;
+            break;
+        case '@':
+            keycode = 29 | SHIFT;
+            break;
+        case '#':
+            keycode = 30 | SHIFT;
+            break;
+        case '$':
+            keycode = 31 | SHIFT;
+            break;
+        case '%':
+            keycode = 32 | SHIFT;
+            break;
+        case '^':
+            keycode = 33 | SHIFT;
+            break;
+        case '&':
+            keycode = 34 | SHIFT;
+            break;
+        case '*':
+            keycode = 35 | SHIFT;
+            break;
+        case '(':
+            keycode = 36 | SHIFT;
+            break;
+        case ')':
+            keycode = 27 | SHIFT;
+            break;
+        default:
+            printf("Oh no unhandled key %c [%d]\n", key.keysym.sym, key.keysym.sym);
+            do_interrupt = 0;
+    }
+    SDL_Keymod mods = SDL_GetModState();
+
+    if (mods & KMOD_SHIFT) {
+        keycode |= SHIFT;
+    }
+
+    if (mods & KMOD_CTRL) {
+        keycode |= CTRL;
+    }
+
+    I->last_key = keycode;
+
+    if (do_interrupt && !interrupt(I, KEYBOARD_INTERRUPT)) {
+        backup_key = keycode;
+    } else {
+        backup_key = 0xff;
+    }
 }
 
 u32 get_palette_color(u16 color) {
@@ -1151,9 +1320,11 @@ void scanline(interp *I, int line_num) {
     u8 bg_tile_row = ((line_num + I->ppu->bg_v_offset) % 8 + 8) % 8;
 
     for (int t = 0; t < row_width; t++) {
+        // Get the bytes that describe our tile
         u8 info = I->ppu->bg_map_data[bg_row_num * row_width * 2 + t * 2];
-        u8 idx  = I->ppu->bg_map_data[bg_row_num * row_width * 2 + t * 2 + 1];
+        u16 idx = I->ppu->bg_map_data[bg_row_num * row_width * 2 + t * 2 + 1];
 
+        // TODO respect horizontal/vertical flip flags
         if (info & 0x1) idx += 256;
 
         u8 palette = (info & 0xe0) >> 5;
@@ -1191,7 +1362,7 @@ void scanline(interp *I, int line_num) {
 
     for (int spr = 0; spr < 256; spr++) {
         u8 info = I->ppu->oam[spr * 4];
-        u8 idx = I->ppu->oam[spr * 4 + 1];
+        u16 idx = I->ppu->oam[spr * 4 + 1];
 
         u8 x = I->ppu->oam[spr * 4 + 2] - I->ppu->sprite_h_offset;
         u8 y = I->ppu->oam[spr * 4 + 3] - I->ppu->sprite_v_offset;
@@ -1248,7 +1419,7 @@ void scanline(interp *I, int line_num) {
     u8 fg_tile_row = ((line_num + I->ppu->fg_v_offset) % 8 + 8) % 8;
     for (int t = 0; t < row_width; t++) {
         u8 info = I->ppu->fg_map_data[fg_row_num * row_width * 2 + t * 2];
-        u8 idx  = I->ppu->fg_map_data[fg_row_num * row_width * 2 + t * 2 + 1];
+        u16 idx = I->ppu->fg_map_data[fg_row_num * row_width * 2 + t * 2 + 1];
 
         if (info & 0x1) idx += 256;
 
@@ -1303,7 +1474,7 @@ void draw(interp *I) {
     for (int y = 0; y < SCRH; y++) {
         scanline(I, y);
         interrupt(I, HBLANK_INTERRUPT);
-        while (!(I->flags & INTERRUPT_ENABLE_NEXT)) {
+        while (!(I->flags & INTERRUPT_ENABLE_NEXT) && (I->flags & RUN_FLAG)) {
             do_instr(I);
         }
         I->flags |= INTERRUPT_ENABLE;

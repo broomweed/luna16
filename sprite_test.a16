@@ -4,6 +4,9 @@
 #at $88 "hblank interrupt"
     jmp hblank_handler
 
+#at $90 "keyboard interrupt"
+    reti
+
 #at $100 "Sprite Loader"
     ; Load palette
     mov a, %0_01111_11000_11111
@@ -55,7 +58,7 @@ load_tiles:
     mov e, $0002
 write_bg:
     ; Write to bg tilemap
-    mov c, 16
+    mov c, 32
 row:
     sw $c000[a], d
     sw $c002[a], d
@@ -78,9 +81,9 @@ mainloop:
     sb [$d7fe], a
 
     ; Tile vertical scroll
-    ;lb a, [$d7fb]
+    ;lb a, [$d7fa]
     ;inc a
-    ;sb [$d7fb], a
+    ;sb [$d7fa], a
 
     ; Save and restore tile horizontal scroll
     lb a, [$d7fa]
@@ -114,14 +117,11 @@ hblank_handler:
     lb i, [$8000]
     add i, h
     mod i, 16
-    jz store_g
-    cmp i, 8
-    je store_g
+    cmp i, 5
     jlt dec_g
     add g, 2
 dec_g:
     dec g
-store_g:
     sb [$d7fa], g
 
     inc h
