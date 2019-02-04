@@ -90,6 +90,12 @@ def i_jr(reg):
         raise AssembleError("JR can accept only a register as an argument")
     return bytes([0x03, get_reg(reg) << 4])
 
+@table('swap')
+def i_swap(reg1, reg2):
+    r1 = get_reg(reg1)
+    r2 = get_reg(reg2)
+    return bytes([0x04, (r1 << 4) | r2])
+
 def gen_arith(code):
     ''' Generate an arithmetic instruction with
         operation id `code`, taking two arguments. '''

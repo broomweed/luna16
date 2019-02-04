@@ -1,28 +1,26 @@
-#at $84 "vblank interrupt"
+#at $80 "vblank interrupt"
     reti
+
+#at $88 "hblank interrupt"
+    jmp hblank_handler
 
 #at $100 "Sprite Loader"
     ; Load palette
-    mov a, %0_11111_11111_11111
+    mov a, %0_01111_11000_11111
     sw [$d400], a
-    cpl a
-    sw [$d480], a
     mov a, %0_00000_00000_00000
-    sw [$d402], a
-    cpl a
     sw [$d482], a
+    mov a, %0_01111_01111_11111
+    sw [$d402], a
     mov a, %0_11111_00000_00000
-    sw [$d404], a
-    cpl a
     sw [$d484], a
+    sw [$d404], a
     mov a, %0_00000_11111_00000
-    sw [$d406], a
-    cpl a
     sw [$d486], a
+    sw [$d406], a
     mov a, %0_00000_00000_11111
-    sw [$d408], a
-    cpl a
     sw [$d488], a
+    sw [$d408], a
 
     ; Load sprite data into pattern table
     mov a, 0
@@ -39,30 +37,129 @@ copysprite:
     mov a, $1a1a
     sw [$d002], a
 
-mainloop:
-    ; Sprite vertical scroll
-    lb a, [$d7ff]
-    inc a
-    sb [$d7ff], a
+    ; Make the bg a checkerboard pattern?
+    mov a, 0
+load_tiles:
+    ; Load tiles into pattern table
+    lw d, tile1[a]
+    sw $d520[a], d
+    lw d, tile2[a]
+    sw $d540[a], d
 
+    add a, 2
+    cmp a, 32
+    jlt load_tiles
+
+    mov a, 0
+    mov d, $0001
+    mov e, $0002
+write_bg:
+    ; Write to bg tilemap
+    mov c, 16
+row:
+    sw $c000[a], d
+    sw $c002[a], d
+    sw $c004[a], e
+    sw $c006[a], e
+
+    add a, 8
+    dec c
+    jnz row
+
+    swap d, e
+
+    cmp a, $800
+    jlt write_bg
+
+mainloop:
+    ; Sprite horizontal scroll
     lb a, [$d7fe]
     inc a
     sb [$d7fe], a
 
-    lb a, [$d7fb]
-    inc a
-    sb [$d7fb], a
+    ; Tile vertical scroll
+    ;lb a, [$d7fb]
+    ;inc a
+    ;sb [$d7fb], a
+
+    ; Save and restore tile horizontal scroll
+    lb a, [$d7fa]
+    push a
 
     halt
+
+    lb h, [$8004]
+    inc h
+    sb [$8004], h
+    mod h, 2
+    jnz skip_increase
+
+    lb h, [$8000]
+    inc h
+    sb [$8000], h
+
+skip_increase:
+    pop a
+    sb [$d7fa], a
     jmp mainloop
+
+#section "Hblank handler"
+hblank_handler:
+    push g
+    push h
+    push i
+
+    lb g, [$d7fa]
+    lb h, [$8002]
+    lb i, [$8000]
+    add i, h
+    mod i, 16
+    jz store_g
+    cmp i, 8
+    je store_g
+    jlt dec_g
+    add g, 2
+dec_g:
+    dec g
+store_g:
+    sb [$d7fa], g
+
+    inc h
+    sb [$8002], h
+
+end:
+    pop i
+    pop h
+    pop g
+    reti
 
 #section "Sprite data"
 sprite:
-    data 00111100
-    data 01222210
-    data 12333321
-    data 123cc321
-    data 123cc321
-    data 12333321
-    data 01222210
-    data 00111100
+    data 00110000
+    data 01210011
+    data 12221121
+    data 12122221
+    data 12222221
+    data 12221121
+    data 01210011
+    data 00110000
+
+tile1:
+    data 11111111
+    data 11111111
+    data 11111111
+    data 11111111
+    data 11111111
+    data 11111111
+    data 11111111
+    data 11111111
+
+tile2:
+    data 00000000
+    data 00000000
+    data 00000000
+    data 00000000
+    data 00000000
+    data 00000000
+    data 00000000
+    data 00000000

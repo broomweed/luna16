@@ -19,6 +19,9 @@
 
 #define SCALE 4
 
+#define VBLANK_INTERRUPT 0x80
+#define HBLANK_INTERRUPT 0x88
+
 //#define DEBUG
 
 #ifdef DEBUG
@@ -107,12 +110,12 @@ typedef struct interp {
 typedef struct ppu {
     // Horizontal/vertical drawing offset
     // (-128 to +127)
-    i8 sprite_h_offset;
-    i8 sprite_v_offset;
-    i8 bg_h_offset;
-    i8 bg_v_offset;
-    i8 fg_h_offset;
-    i8 fg_v_offset;
+    u8 sprite_h_offset;
+    u8 sprite_v_offset;
+    u8 bg_h_offset;
+    u8 bg_v_offset;
+    u8 fg_h_offset;
+    u8 fg_v_offset;
     //
     // palette data % 0rrrrrgg gggbbbbb
     //
@@ -528,7 +531,7 @@ int main (int argc, char **argv) {
             draw(&I);
             time = SDL_GetTicks();
             // vblank interrupt
-            interrupt(&I, 0x84);
+            interrupt(&I, VBLANK_INTERRUPT);
         }
         if (I.flags & INTERRUPT_ENABLE_NEXT) {
             I.flags &= ~INTERRUPT_ENABLE_NEXT;
@@ -680,6 +683,18 @@ void do_instr(interp *I) {
             I->pc = *jump_reg;
             // don't increment pc
             pc_increment = 0;
+            ok = 1;
+        } else if (subcode == 4) {
+            // Swap two registers
+            //      0000 0100 xxxx yyyy
+            // xxxx, yyyy = registers to swap
+            u8 reg_idx1 = srl(rest, 4);
+            u8 reg_idx2 = (rest & 0xf);
+            u16 *r1 = get_reg(I, reg_idx1);
+            u16 *r2 = get_reg(I, reg_idx2);
+            *r1 ^= *r2;
+            *r2 ^= *r1;
+            *r1 ^= *r2;
             ok = 1;
         }
     } else if ((instrtype & 0x8) == 0x8) {
@@ -1042,7 +1057,7 @@ int init_draw() {
         SCRH = 136;
     } else {
         SCRW = 240;
-        SCRH = 180;
+        SCRH = 176;
     }
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -1108,7 +1123,7 @@ void scanline(interp *I, int line_num) {
             u8 pal_color_hi = I->ppu->palette_data[pal * 16 + i * 2];
             u8 pal_color_lo = I->ppu->palette_data[pal * 16 + i * 2 + 1];
             u16 pal_color = (pal_color_hi << 8) | pal_color_lo;
-            sprite_palettes[pal][i] = get_palette_color(pal_color);
+            tile_palettes[pal][i] = get_palette_color(pal_color);
         }
     }
 
@@ -1117,7 +1132,7 @@ void scanline(interp *I, int line_num) {
             u8 pal_color_hi = I->ppu->palette_data[128 + pal * 16 + i * 2];
             u8 pal_color_lo = I->ppu->palette_data[128 + pal * 16 + i * 2 + 1];
             u16 pal_color = (pal_color_hi << 8) | pal_color_lo;
-            tile_palettes[pal][i] = get_palette_color(pal_color);
+            sprite_palettes[pal][i] = get_palette_color(pal_color);
         }
     }
 
@@ -1128,21 +1143,23 @@ void scanline(interp *I, int line_num) {
     }
 
     int row_width = 32;
+
+    // Back tile layer
     // Which row of tiles are we drawing?
-    int row_num = (((line_num + I->ppu->bg_v_offset) / 8) % 32 + 32) % 32;
+    int bg_row_num = (((line_num + I->ppu->bg_v_offset) / 8) % 32 + 32) % 32;
     // Which row of that row are we drawing? (i.e. y=0-7)
-    u8 tile_row = ((line_num + I->ppu->bg_v_offset) % 8 + 8) % 8;
+    u8 bg_tile_row = ((line_num + I->ppu->bg_v_offset) % 8 + 8) % 8;
 
     for (int t = 0; t < row_width; t++) {
-        u8 info = I->ppu->bg_map_data[row_num * row_width + t * 2];
-        u8 idx  = I->ppu->bg_map_data[row_num * row_width + t * 2 + 1];
+        u8 info = I->ppu->bg_map_data[bg_row_num * row_width * 2 + t * 2];
+        u8 idx  = I->ppu->bg_map_data[bg_row_num * row_width * 2 + t * 2 + 1];
 
         if (info & 0x1) idx += 256;
 
         u8 palette = (info & 0xe0) >> 5;
 
         // get the appropriate row of the tile (4 bytes)
-        u8 *tile_bytes = &I->ppu->pattern_table[idx + tile_row * 4];
+        u8 *tile_bytes = &I->ppu->pattern_table[idx * 32 + bg_tile_row * 4];
 
         int x = t * 8 - I->ppu->bg_h_offset;
 
@@ -1156,13 +1173,17 @@ void scanline(interp *I, int line_num) {
             u8 x0 = (x + i * 2) % 256;
             u8 x1 = (x + i * 2 + 1) % 256;
 
-            if (x0 >= 0 && x0 < SCRW && c0 != 0) {
-                line_colors[x0] = tile_palettes[palette][c0];
+            if (x0 >= 0 && x0 < SCRW) {
+                if (c0 != 0) {
+                    line_colors[x0] = tile_palettes[palette][c0];
+                }
                 line_priorities[x0] = p0;
             }
 
-            if (x1 >= 0 && x1 < SCRW && c1 != 0) {
-                line_colors[x1] = tile_palettes[palette][c1];
+            if (x1 >= 0 && x1 < SCRW) {
+                if (c1 != 0) {
+                    line_colors[x1] = tile_palettes[palette][c1];
+                }
                 line_priorities[x1] = p1;
             }
         }
@@ -1175,6 +1196,9 @@ void scanline(interp *I, int line_num) {
         u8 x = I->ppu->oam[spr * 4 + 2] - I->ppu->sprite_h_offset;
         u8 y = I->ppu->oam[spr * 4 + 3] - I->ppu->sprite_v_offset;
 
+        // Check layer flag
+        u8 base_priority = (info & 0x10) ? 2 : 0;
+
         if (info & 0x1) idx += 256; // high half of table
 
         u8 sprite_size = (info & 0x2) ? 16 : 8; // 16px sprite flag
@@ -1182,12 +1206,12 @@ void scanline(interp *I, int line_num) {
         u8 palette = (info & 0xe0) >> 5;
 
         u8 sprite_row = (((line_num - y) % 256) + 256) % 256;
-        if (sprite_row > sprite_size) {
+        if (sprite_row >= sprite_size) {
             continue;
         }
 
         u8 *sprite_bytes; // get the appropriate row of the sprite (4 bytes)
-        sprite_bytes = &I->ppu->pattern_table[idx + sprite_row * 4];
+        sprite_bytes = &I->ppu->pattern_table[idx * 32 + sprite_row * 4];
 
         for (int i = 0; i < 4; i++) {
             u8 c0 = (sprite_bytes[i] >> 4) & 0x7;
@@ -1195,21 +1219,72 @@ void scanline(interp *I, int line_num) {
 
             u8 p0 = ((sprite_bytes[i] >> 7) & 0x1) ? 3 : 1;
             u8 p1 = ((sprite_bytes[i] >> 3) & 0x1) ? 3 : 1;
+            p0 += base_priority;
+            p1 += base_priority;
 
             u8 x0 = (x + i * 2) % 256;
             u8 x1 = (x + i * 2 + 1) % 256;
 
-            if (x0 >= 0 && x0 < SCRW && c0 != 0 && p0 > line_priorities[x0]) {
-                line_colors[x0] = sprite_palettes[palette][c0];
+            if (x0 >= 0 && x0 < SCRW && p0 > line_priorities[x0]) {
+                if (c0 != 0) {
+                    line_colors[x0] = sprite_palettes[palette][c0];
+                }
                 line_priorities[x0] = p0;
             }
 
-            if (x1 >= 0 && x1 < SCRW && c1 != 0 && p1 > line_priorities[x1]) {
-                line_colors[x1] = sprite_palettes[palette][c1];
+            if (x1 >= 0 && x1 < SCRW && p1 > line_priorities[x1]) {
+                if (c1 != 0) {
+                    line_colors[x1] = sprite_palettes[palette][c1];
+                }
                 line_priorities[x1] = p1;
             }
         }
     }
+
+    // Front tile layer
+    // Which row of tiles are we drawing?
+    int fg_row_num = (((line_num + I->ppu->fg_v_offset) / 8) % 32 + 32) % 32;
+    // Which row of that row are we drawing? (i.e. y=0-7)
+    u8 fg_tile_row = ((line_num + I->ppu->fg_v_offset) % 8 + 8) % 8;
+    for (int t = 0; t < row_width; t++) {
+        u8 info = I->ppu->fg_map_data[fg_row_num * row_width * 2 + t * 2];
+        u8 idx  = I->ppu->fg_map_data[fg_row_num * row_width * 2 + t * 2 + 1];
+
+        if (info & 0x1) idx += 256;
+
+        u8 palette = (info & 0xe0) >> 5;
+
+        // get the appropriate row of the tile (4 bytes)
+        u8 *tile_bytes = &I->ppu->pattern_table[idx * 32 + fg_tile_row * 4];
+
+        int x = t * 8 - I->ppu->fg_h_offset;
+
+        for (int i = 0; i < 4; i++) {
+            u8 c0 = (tile_bytes[i] >> 4) & 0x7;
+            u8 c1 = (tile_bytes[i] >> 0) & 0x7;
+
+            u8 p0 = ((tile_bytes[i] >> 7) & 0x1) ? 6 : 4;
+            u8 p1 = ((tile_bytes[i] >> 3) & 0x1) ? 6 : 4;
+
+            u8 x0 = (x + i * 2) % 256;
+            u8 x1 = (x + i * 2 + 1) % 256;
+
+            if (x0 >= 0 && x0 < SCRW) {
+                if (c0 != 0) {
+                    line_colors[x0] = tile_palettes[palette][c0];
+                }
+                line_priorities[x0] = p0;
+            }
+
+            if (x1 >= 0 && x1 < SCRW) {
+                if (c1 != 0) {
+                    line_colors[x1] = tile_palettes[palette][c1];
+                }
+                line_priorities[x1] = p1;
+            }
+        }
+    }
+
 
     for (int i = 0; i < SCRW; i++) {
         //printf("%d: %8X\n", i, line_colors[i]);
@@ -1227,6 +1302,12 @@ void draw(interp *I) {
 
     for (int y = 0; y < SCRH; y++) {
         scanline(I, y);
+        interrupt(I, HBLANK_INTERRUPT);
+        while (!(I->flags & INTERRUPT_ENABLE_NEXT)) {
+            do_instr(I);
+        }
+        I->flags |= INTERRUPT_ENABLE;
+        I->flags &= ~INTERRUPT_ENABLE_NEXT;
     }
     SDL_SetRenderTarget(renderer, NULL);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
@@ -1244,21 +1325,21 @@ void init_ppu(ppu *p) {
     p->fg_v_offset = 0;
 
     for (int i = 0; i < 256; i++) {
-        p->palette_data[i] = 0;
+        p->palette_data[i] = 0xFF;
     }
 
     for (int i = 0; i < 2048; i++) {
-        p->bg_map_data[i] = 0;
-        p->fg_map_data[i] = 0;
+        p->bg_map_data[i] = 0xFF;
+        p->fg_map_data[i] = 0xFF;
     }
 
     for (int i = 0; i < 1024; i++) {
-        p->oam[i] = 0;
+        p->oam[i] = 0xFF;
     }
 
-    p->pattern_offset = 0;
+    p->pattern_offset = 0x00;
 
     for (int i = 0; i < 16384; i++) {
-        p->pattern_table[i] = 0;
+        p->pattern_table[i] = 0x00;
     }
 }
