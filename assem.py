@@ -324,6 +324,19 @@ def handle_directive(dct, args):
         if type(args[0]) != tuple or args[0][0] != 'str':
             raise AssembleError("argument to #section must be string")
         new_section(args[0][1], -1)
+    elif dct == '#include_bin':
+        global ba, current_position
+        # Just dump a bunch of bytes from an external file
+        # into this file.
+        if len(args) != 1:
+            raise AssembleError("#include_bin needs one argument: file name to include")
+        if type(args[0]) != tuple or args[0][0] != 'str':
+            raise AssembleError("argument to #include_bin must be string")
+        # Read file into byte array
+        with open(args[0][1], 'rb') as binfile:
+            binary_data = bytes(binfile.read())
+        ba += binary_data
+        current_position += len(binary_data)
     else:
         raise AssembleError("unknown directive '%s'" % dct)
 

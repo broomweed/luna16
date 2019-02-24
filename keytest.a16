@@ -1,0 +1,106 @@
+#at $80 "vblank"
+    reti
+
+#at $88 "hblank"
+    reti
+
+#at $90 "keyboard"
+    jmp handle_key
+
+#section "key handler"
+handle_key:
+    lb k, [$ff02]
+
+    cmp k, $40
+    jne check_ctrl
+
+    ; If it's $40 (shift+space), remove the shift
+    and k, %1011_1111
+
+check_ctrl:
+    ; if ctrl pressed, flip upside down
+    bit k, 7
+    jz write_character
+
+    and k, %0111_1111
+    or k, $0c00
+
+write_character:
+    lw i, [$8000]
+    sw $c000[i], k
+
+    ; Advance cursor
+    add i, 2
+    sw [$8000], i
+
+end_handle_key:
+    reti
+
+#at $100 "start"
+    di
+
+    ; Load simple palette
+    mov a, %0_00000_00000_00000
+    sw [$d400], a
+
+    mov a, %0_00000_00000_00000
+    sw [$d402], a
+
+    mov a, %0_11111_11111_11111
+    sw [$d404], a
+
+    mov a, %0_00000_00000_00000
+    sw [$d412], a
+
+    mov a, %0_11111_11000_00000
+    sw [$d414], a
+
+    ; Copy characters into pattern table
+    ; Each char is 32 bytes; a = how many bytes to copy
+    mov a, 4096
+    ; d = current byte index
+    mov d, 0
+
+copy_chars:
+    ; c = index into current pattern
+    mov c, 0
+
+copy_char:
+    ; Copy from font to pattern table
+    lw g, font[d]
+    sw $d500[c], g
+    add d, 2
+    add c, 2
+    cmp c, 32
+    jlt copy_char
+
+    ; Every 32 bytes, move to next pattern slot
+    lb g, [$d7f9]
+    inc g
+    sb [$d7f9], g
+    cmp d, a
+    jne copy_chars
+
+    ; Done, so reenable interrupts
+    ei
+
+; Replace sprite indices in OAM with FF (empty)
+    mov a, $ff
+    mov c, 0
+empty_sprites:
+    sb $d001[c], a
+    add c, 4
+    cmp c, $400
+    jne empty_sprites
+
+; Load tile index of next character
+    mov a, $0
+    sw [$8000], a
+
+main_loop:
+    halt
+    jmp main_loop
+
+#section "font data"
+font:
+#include_bin "font.dat"
