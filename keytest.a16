@@ -83,7 +83,7 @@ backspace:
     mov a, %0_00000_00000_00000
     sw [$d412], a
 
-    ; tile palette 1 color 2: white
+    ; tile palette 1 color 2: cyan
     mov a, %0_11111_11000_00000
     sw [$d414], a
 
