@@ -1,6 +1,8 @@
 from assemlex import lexer
 from assemparse import parser
+
 import sys
+from math import log
 
 verbose = False
 
@@ -114,11 +116,18 @@ def gen_arith(code):
             # Register
             yyyyyy = get_reg(src)
         if type(src) == int:
+            while src < 0:
+                src += 65536
             # Immediate operand
             if 0 <= src <= 15:
                 # Small immediate operand
                 yyyyyy = 0x10 | src
-            elif src == -1:
+            elif src in {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}:
+                # Power of two above 8
+                print("src=%d" % src)
+                yyyyyy = 0x20 | int(log(src, 2))
+                print("y=%x" % yyyyyy)
+            elif src == 0xFFFF:
                 # Negative one
                 yyyyyy = 0x21
             else:

@@ -798,8 +798,17 @@ void do_instr(interp *I) {
             // a common thing and we don't want to waste 16 bits on it.
             // (e.g. if we want to compare to -1 or w/e)
             srcval = 0xFFFF;
+        } else if (src_idx >= 0x24 && src_idx < 0x30) {
+            // yy yyyy = 10 vvvv
+            // vvvv = a value from 4 to 15
+            // this is shorthand for (1 << vvvv), so we can do powers
+            // of two without using an extra byte. Handy for bitmasks, etc.
+
+            // 1<<0 through 1<<3 (1, 2, 4, 8) are handled by 01vvvv, above.
+            // (since they're less than 15)
+            srcval = 1 << (src_idx - 0x20);
         } else {
-            // uh I don't know what 0x2? or 0x3? should be yet
+            // uh I don't know what 0x22 or 0x23 or 0x3? should be yet
             // but we've got some room here to expand!
             fprintf(stderr, "Unknown source operand $%X for "
                     "arithmetic instruction\n", src_idx);
@@ -1265,7 +1274,7 @@ void handle_keydown(interp *I, SDL_KeyboardEvent key) {
             keycode = 27 | SHIFT;
             break;
         default:
-            printf("Oh no unhandled key %c [%d]\n", key.keysym.sym, key.keysym.sym);
+            //printf("Oh no unhandled key %c [%d]\n", key.keysym.sym, key.keysym.sym);
             do_interrupt = 0;
     }
     SDL_Keymod mods = SDL_GetModState();
