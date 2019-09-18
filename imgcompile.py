@@ -1,6 +1,9 @@
 import sys
 from PIL import Image
 
+# This is a little program that converts indexed 128x128 PNG files
+# to the binary format that luna16 uses for sprites and tiles.
+
 if len(sys.argv) < 2:
     print("please supply a file name")
     sys.exit(1)
@@ -57,9 +60,13 @@ else:
 
                     s = "{0:02x}".format(dat)
                     s = s.replace('0', ' ')
-                    s = s.replace('1', '#')
-                    s = s.replace('2', '.')
-                    s = s.replace('3', '*')
+                    s = s.replace('1', '.')
+                    s = s.replace('2', '%')
+                    s = s.replace('3', '=')
+                    s = s.replace('4', 'o')
+                    s = s.replace('5', 'O')
+                    s = s.replace('6', '8')
+                    s = s.replace('7', '@')
                     s = s[0] + s[0] + s[1] + s[1]
                     print(s, end='')
                 print()
