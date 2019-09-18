@@ -9,49 +9,81 @@
 
 #section "key handler"
 handle_key:
+    ; Load key code from key code hw register
     lb k, [$ff02]
 
-    cmp k, $40
-    jne check_ctrl
+    ; Check if the key was, specifically, backspace
+    cmp k, 62
+    je backspace
 
     ; If it's $40 (shift+space), remove the shift
+    cmp k, $40
+    jne check_ctrl
     and k, %1011_1111
 
 check_ctrl:
-    ; if ctrl pressed, flip upside down
+    ; if ctrl pressed, flip upside down (for testing that flag)
     bit k, 7
     jz write_character
 
+    ; Remove the highest bit of the character index,
+    ; but add a bit to the 'flags' byte
     and k, %0111_1111
     or k, $0c00
 
 write_character:
+    ; i = current cursor position
+    ; Write the 16-bit value representing the sprite into memory
     lw i, [$8000]
     sw $c000[i], k
 
-    ; Advance cursor
+    ; Advance cursor to the next position
     add i, 2
     sw [$8000], i
 
 end_handle_key:
+    ; return and enable interrupts
     reti
 
+backspace:
+    ; We pressed backspace, so delete previous character
+    ; Load cursor position
+    lw i, [$8000]
+
+    ; If we're at the beginning already, do nothing.
+    cmp i, 0
+    je end_handle_key
+
+    ; Otherwise, move the cursor backwards and replace
+    ; what was already there with an empty space.
+    sub i, 2
+    mov k, 0
+    sw $c000[i], k
+    sw [$8000], i
+    jmp end_handle_key
+
 #at $100 "start"
+    ; Disable interrupts while we're setting stuff up
     di
 
     ; Load simple palette
+    ; Background color: black
     mov a, %0_00000_00000_00000
     sw [$d400], a
 
+    ; tile palette 0 color 1: black
     mov a, %0_00000_00000_00000
     sw [$d402], a
 
+    ; tile palette 0 color 2: white
     mov a, %0_11111_11111_11111
     sw [$d404], a
 
+    ; tile palette 1 color 1: black
     mov a, %0_00000_00000_00000
     sw [$d412], a
 
+    ; tile palette 1 color 2: white
     mov a, %0_11111_11000_00000
     sw [$d414], a
 
@@ -72,32 +104,47 @@ copy_char:
     add d, 2
     add c, 2
     cmp c, 32
+    ; do we have more bytes to copy in this pattern slot?
     jlt copy_char
 
     ; Every 32 bytes, move to next pattern slot
+    ; (address $d7f9 = pattern offset)
+    ; (eventually, we'll have macros and this garbage will be
+    ;  much easier to understand)
     lb g, [$d7f9]
     inc g
     sb [$d7f9], g
+    ; d = # of bytes copied; a = total # to copy
     cmp d, a
+    ; if we still have more to do, copy more patterns
     jne copy_chars
 
     ; Done, so reenable interrupts
     ei
 
-; Replace sprite indices in OAM with FF (empty)
+    ; Replace sprite indices in OAM with FF (empty)
     mov a, $ff
     mov c, 0
 empty_sprites:
+    ; $d000 = sprite indices; we have to empty these out too
+    ; so they don't cover stuff up
+    ; these are initialized to 0, but 0 = space, which is a solid
+    ; black box for us, so we have to initialize them to 255
+    ; (transparent) instead.
     sb $d001[c], a
     add c, 4
     cmp c, $400
     jne empty_sprites
 
-; Load tile index of next character
+    ; Load tile index of next character
+    ; we store this at $8000, and it starts at 0 since we start
+    ; writing at the top left of the screen
     mov a, $0
     sw [$8000], a
 
 main_loop:
+    ; After this we just enter a holding pattern and all the action
+    ; happens in the keyboard interrupt handler
     halt
     jmp main_loop
 
