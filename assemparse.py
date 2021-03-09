@@ -38,8 +38,8 @@ def p_line_directive(p):
     '''line : directive EOL'''
     p[0] = (p.lineno(2), *p[1])
 
-def p_line_data(p):
-    '''line : datadecl EOL'''
+def p_line_hexdata(p):
+    '''line : hexdatadecl EOL'''
     p[0] = p[1]
 
 def p_params_single(p):
@@ -102,8 +102,8 @@ def p_dirparam_str(p):
     '''dirparam : STRING'''
     p[0] = ('str', p[1])
 
-def p_datadecl(p):
-    '''datadecl : DATA dirparams'''
+def p_hexdatadecl(p):
+    '''hexdatadecl : HEX dirparams'''
     p[0] = (p.lineno(1), 'data', p[2])
 
 def p_error(p):

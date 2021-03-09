@@ -2,15 +2,15 @@ import ply.lex as lex
 
 tokens = [ 'REG', 'NAME', 'NUMBER', 'OPENPAREN', 'CLOSEPAREN',
            'EOL', 'COMMA', 'OPENBRACKET', 'CLOSEBRACKET',
-           'COLON', 'HASHTAG', 'STRING', 'DATA' ]
+           'COLON', 'HASHTAG', 'STRING', 'HEX' ]
 
 states = (
-    ('data', 'exclusive'),
+    ('hexdata', 'exclusive'),
 )
 
 t_ignore = ' \t\r'
 
-t_data_ignore = ' \t\r_$'
+t_hexdata_ignore = ' \t\r_$'
 
 t_OPENPAREN = r'\('
 t_CLOSEPAREN = r'\)'
@@ -20,20 +20,20 @@ t_COMMA = r','
 t_COLON = r':'
 t_HASHTAG = r'\#[a-zA-Z0-9_]+'
 
-def t_data_NUMBER(t):
+def t_hexdata_NUMBER(t):
     r'[0-9a-fA-F][0-9a-fA-F]'
     t.value = int(t.value, 16)
     return t
 
-def t_data_EOL(t):
+def t_hexdata_EOL(t):
     r'\n'
     t.lexer.lineno += 1
     t.lexer.begin('INITIAL')
     return t
 
-def t_DATA(t):
-    r'data|DATA'
-    t.lexer.begin('data')
+def t_HEX(t):
+    r'hex|HEX'
+    t.lexer.begin('hexdata')
     return t
 
 def t_EOL(t):
@@ -94,7 +94,7 @@ def t_COMMENT(t):
     t.value = "\n"
     return t
 
-def t_data_COMMENT(t):
+def t_hexdata_COMMENT(t):
     r';.*\n'
     t.lexer.lineno += 1
     t.type = 'EOL'

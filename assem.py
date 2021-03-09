@@ -28,6 +28,12 @@ fragments = []
 class AssembleError(Exception):
     pass
 
+def is_reg(value):
+    return typeof(value) == tuple and value[0] == 'reg'
+
+def is_mem(value):
+    return typeof(value) == tuple and value[0] == 'ref'
+
 def table(instruction):
     def decorator(func):
         instr_table[instruction] = func
@@ -76,19 +82,19 @@ def i_data(*data):
 
 @table('push')
 def i_push(reg):
-    if type(reg) != tuple or reg[0] != 'reg':
+    if not is_reg(reg):
         raise AssembleError("PUSH can accept only a register as an argument")
     return bytes([0x01, get_reg(reg) << 4])
 
 @table('pop')
 def i_pop(reg):
-    if type(reg) != tuple or reg[0] != 'reg':
+    if not is_reg(reg):
         raise AssembleError("POP can accept only a register as an argument")
     return bytes([0x02, get_reg(reg) << 4])
 
 @table('jr')
 def i_jr(reg):
-    if type(reg) != tuple or reg[0] != 'reg':
+    if not is_reg(reg):
         raise AssembleError("JR can accept only a register as an argument")
     return bytes([0x03, get_reg(reg) << 4])
 
@@ -103,7 +109,7 @@ def gen_arith(code):
         operation id `code`, taking two arguments. '''
 
     def inner(dest, src):
-        if type(dest) != tuple or dest[0] != 'reg':
+        if not is_reg(dest):
             raise AssembleError(
                 'destination operand for arithmetic operation must be a register'
             )
@@ -112,10 +118,10 @@ def gen_arith(code):
         xx1 = (xxxx >> 2) & 3
         xx2 = xxxx & 3
 
-        if type(src) == tuple and src[0] == 'reg':
+        if is_reg(src):
             # Register
             yyyyyy = get_reg(src)
-        if type(src) == int:
+        elif type(src) == int:
             while src < 0:
                 src += 65536
             # Immediate operand
@@ -132,7 +138,7 @@ def gen_arith(code):
                 # Big immediate operand
                 yyyyyy = 0x20
             imm = src
-        if type(src) == str:
+        elif type(src) == str:
             # Label (or macro but we don't have them yet!)
             yyyyyy = 0x20
             imm = 0
@@ -152,7 +158,7 @@ def gen_arith_unary(code):
         operation id `code`, taking only one argument. '''
 
     def inner(dest):
-        if type(dest) != tuple or dest[0] != 'reg':
+        if not is_reg(dest):
             raise AssembleError(
                 'destination operand for arithmetic operation must be a register'
             )
@@ -206,14 +212,14 @@ def gen_loadstore(name, code, is_load):
             reg_param = 'source'
             reg, mem = mem, reg
 
-        if type(mem) != tuple or mem[0] != 'ref':
+        if not is_mem(mem):
             raise AssembleError(
                 mem_param + ' operand of ' + name.upper() + ' must be a memory location'
             )
 
         _, origin, offset = mem
 
-        if type(reg) != tuple or reg[0] != 'reg':
+        if not is_reg(reg):
             raise AssembleError(
                 reg_param + ' operand of ' + name.upper() + ' must be a register'
             )
@@ -223,7 +229,7 @@ def gen_loadstore(name, code, is_load):
         xxx = xxxx >> 1
         x = xxxx & 1
 
-        if type(origin) == tuple and origin[0] == 'reg':
+        if is_reg(origin):
             if type(offset) == int:
                 imm = offset
                 yyyyyy = get_reg(origin)
@@ -561,6 +567,9 @@ if __name__ == "__main__":
             # although we might miss a few that could be shortened.)
             # I'll figure this out later. For now, we get the naive
             # version.
+            # (Future update: actually, might be easier to just only
+            #  use the relative jumps within a section? I dunno,
+            #  figure it out later)
 
             # Add address for absolute jump
             try:

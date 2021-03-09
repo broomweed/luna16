@@ -81,7 +81,7 @@ unsigned char rom_buffer[ROM_SIZE];
 
 // Here's our machine!
 typedef struct interp {
-    // 14 general use registers
+    // 12 general use registers
     u16 a;
     u16 b;
     u16 c;
@@ -97,8 +97,11 @@ typedef struct interp {
     u16 k;
     u16 l;
 
-    u16 m;
-    u16 n;
+    // data bank register (actually only 8 bits)
+    u16 dbr;
+
+    // program bank register (also only 8 bits)
+    u16 pbr;
 
     // stack pointer register
     u16 sp;
@@ -109,22 +112,11 @@ typedef struct interp {
     // interpreter flags
     u16 flags;
 
-    // bank IDs (for accessing more RAM/ROM)
-    // we always get the bottom 8k of RAM at
-    // $8000 - $9FFF, and any other 8k of RAM
-    // at $a000 - $bfff. we can swap banks by
-    // writing to certain addresses
-    u8 ram_bank;
-    // similarly, we always get the bottom 16k
-    // of ROM at $0000 - $3fff, and any other
-    // 16k of ROM at $4000 - $7fff.
-    u8 rom_bank;
-
     // pointer to ROM data
     u8 *rom;
 
-    // 64k of sweet sweet RAM
-    u8 mem[65536];
+    // 16k of sweet sweet RAM
+    u8 mem[16384];
 
     // Last keyboard button pressed
     u8 last_key;
@@ -214,22 +206,22 @@ void insert_string(u8 *mem, u16 offset, int length, char *str) {
 u16 *get_reg(interp *I, char reg_id) {
     // given register id (0-7), return a pointer to the right register
     switch(reg_id) {
-        case 0:  return &I->a;  break;
-        case 1:  return &I->b;  break;
-        case 2:  return &I->c;  break;
-        case 3:  return &I->d;  break;
-        case 4:  return &I->e;  break;
-        case 5:  return &I->f;  break;
-        case 6:  return &I->g;  break;
-        case 7:  return &I->h;  break;
-        case 8:  return &I->i;  break;
-        case 9:  return &I->j;  break;
-        case 10: return &I->k;  break;
-        case 11: return &I->l;  break;
-        case 12: return &I->m;  break;
-        case 13: return &I->n;  break;
-        case 14: return &I->sp; break;
-        case 15: return &I->pc; break;
+        case 0:  return &I->a;   break;
+        case 1:  return &I->b;   break;
+        case 2:  return &I->c;   break;
+        case 3:  return &I->d;   break;
+        case 4:  return &I->e;   break;
+        case 5:  return &I->f;   break;
+        case 6:  return &I->g;   break;
+        case 7:  return &I->h;   break;
+        case 8:  return &I->i;   break;
+        case 9:  return &I->j;   break;
+        case 10: return &I->k;   break;
+        case 11: return &I->l;   break;
+        case 12: return &I->dbr; break;
+        case 13: return &I->pbr; break;
+        case 14: return &I->sp;  break;
+        case 15: return &I->pc;  break;
         default:
             fprintf(stderr, "internal error: invalid reg id %d\n", reg_id);
 #ifdef DEBUG
@@ -257,16 +249,24 @@ u16 srl(u16 val, int amt) {
 }
 
 void store_byte(interp *I, u16 addr, u8 value) {
-    // Writing below $8000 does nothing - this is ROM, so
-    // it's read only, obvi
-    if (addr < 0x8000) {
-        fprintf(stderr, "Attempt to write to ROM-mapped location $%04X "
-                "(pc: $%04X)\n", addr, I->pc);
+    // we have 16k of ram, always mapped to 0x0000~0x4000 no matter what bank
+    if (addr < 0x4000) {
+        I->mem[addr] = value;
+    }
+
+    // a 32k chunk of ROM always mapped to upper half of bank, but not writable!
+    if (addr > 0x8000) {
+        fprintf(stderr, "Attempt to write to ROM-mapped location $%02X:%04X "
+                "(pc: $%02X:%04X)\n", I->dbr, addr, I->pbr, I->pc);
 #ifdef DEBUG
         debug_counter = 0;
 #endif
     }
 
+    /* TODO come up with the rest of the memory mapping!!
+     * t o o   t i r e d   for this right now */
+
+    /*
     // 0x8000-0x9fff is always the first 8k of RAM
     else if (addr < 0xa000) {
         I->mem[addr - 0x8000] = value;
@@ -311,7 +311,7 @@ void store_byte(interp *I, u16 addr, u8 value) {
     }
     // 505 bytes at $d600 - $d7f8 is currently unused, but reserved
     else if (addr < 0xcff9) {
-        /* nothing happens */
+        // nothing happens
         printf("Unimplemented writing to %04X\n", addr);
 #ifdef DEBUG
         debug_counter = 0;
@@ -344,19 +344,8 @@ void store_byte(interp *I, u16 addr, u8 value) {
     // $d7ff is the sprite layer's vertical offset (signed)
     else if (addr == 0xd7ff) {
         I->ppu->sprite_v_offset = value;
-    }
-
-    // 0xff00+ = magic addresses
-    else if (addr == 0xff00) {
-        I->rom_bank = value;
-    }
-
-    else if (addr == 0xff01) {
-        I->ram_bank = value;
-    }
-
-    else if (addr == 0xff02) {
-        /* doesn't do anything */
+    } else if (addr == 0xff02) {
+        // doesn't do anything
         printf("Attempted write to read-only HW register $FF02 (keyboard key)\n");
 #ifdef DEBUG
         debug_counter = 0;
@@ -370,9 +359,10 @@ void store_byte(interp *I, u16 addr, u8 value) {
         debug_counter = 0;
 #endif
     }
+    */
 }
 
-u8 load_byte(interp *I, u16 addr) {
+u8 load_byte(interp *I, u16 addr, int bank) {
     // Reading below $4000 returns stuff in first 16k of ROM, always
     if (addr < 0x4000) {
         return I->rom[addr];
@@ -380,7 +370,7 @@ u8 load_byte(interp *I, u16 addr) {
 
     // Reading $4000 - $7fff returns stuff in a different 16k chunk of ROM
     else if (addr < 0x8000) {
-        return I->rom[addr + I->rom_bank * 0x4000];
+        return I->rom[addr + bank * 0x4000];
     }
 
     // Reading $8000 - $9fff returns values in first 8k of RAM
@@ -390,7 +380,7 @@ u8 load_byte(interp *I, u16 addr) {
 
     // Reading $a000 - $bfff returns values in other 8k of RAM
     else if (addr < 0xc000) {
-        return I->mem[addr - 0xa000 + I->ram_bank * 0x2000];
+        return I->mem[addr - 0xa000 + bank * 0x2000];
     }
 
     // $c000 - $c7ff is background tilemap
@@ -458,15 +448,6 @@ u8 load_byte(interp *I, u16 addr) {
         return I->ppu->sprite_v_offset;
     }
 
-    // magic addresses 0xff00+
-    else if (addr == 0xff00) {
-        return I->rom_bank;
-    }
-
-    else if (addr == 0xff01) {
-        return I->ram_bank;
-    }
-
     else if (addr == 0xff02) {
         return I->last_key;
     }
@@ -496,7 +477,7 @@ void store_word(interp *I, u16 addr, u16 value) {
     store_byte(I, addr + 1, loval);
 }
 
-u16 load_word(interp *I, u16 addr) {
+u16 load_word(interp *I, u16 addr, int bank) {
     if (addr % 2 == 1) {
         fprintf(stderr, "Unaligned word read at $%04X (pc: $%04X)\n", addr, I->pc);
 #ifdef DEBUG
@@ -505,8 +486,8 @@ u16 load_word(interp *I, u16 addr) {
         return 0;
     }
 
-    u8 hival = load_byte(I, addr);
-    u8 loval = load_byte(I, addr+1);
+    u8 hival = load_byte(I, addr, bank);
+    u8 loval = load_byte(I, addr+1, bank);
 
     return ((u16)hival << 8) | loval;
 }
@@ -530,16 +511,17 @@ int main (int argc, char **argv) {
     I.flags = RUN_FLAG | INTERRUPT_ENABLE;
 
     // program starts at 0x0100, after a 256-byte header
+    I.pbr = 0;
+    I.dbr = 0;
+
     I.pc = 0x0100;
 
-    // stack starts at 0x9ffe so it's always available
-    // and not in a bank that might get swapped out
+    // stack starts here... probably should fix this
     I.sp = 0x9ffe;
 
     // all other registers start at 0
     I.a = I.b = I.c = I.d = I.e = I.f
-        = I.g = I.h = I.i = I.j = I.k
-        = I.l = I.m = I.n = 0;
+        = I.g = I.h = I.i = I.j = I.k = I.l = 0;
 
     FILE *rom = fopen(argv[1], "rb");
 
@@ -615,7 +597,7 @@ int main (int argc, char **argv) {
                         printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
                         printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
                         printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
-                        printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
+                        printf("     DB %04X PB %04X SP %04X PC %04X\n", I.dbr, I.pbr, I.sp, I.pc);
                     } else if (!strcmp(cmd, "help\n")) {
                         printf("* Press enter or type \"cont\" to advance one instruction.\n");
                         printf("* Type \"state\" or \"s\" to print register state.\n");
@@ -639,7 +621,7 @@ int main (int argc, char **argv) {
     printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I.a, I.b, I.c, I.d);
     printf("     e: %04X f: %04X g: %04X h: %04X\n", I.e, I.f, I.g, I.h);
     printf("     i: %04X j: %04X k: %04X l: %04X\n", I.i, I.j, I.k, I.l);
-    printf("     m: %04X n: %04X SP %04X PC %04X\n", I.m, I.n, I.sp, I.pc);
+    printf("     DB %04X PB %04X SP %04X PC %04X\n", I.dbr, I.pbr, I.sp, I.pc);
 
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -648,7 +630,7 @@ int main (int argc, char **argv) {
 }
 
 void do_instr(interp *I) {
-    u16 instr = load_word(I, I->pc);
+    u16 instr = load_word(I, I->pc, I->pbr);
 
     // first 4 bits are the opcode
     u16 instrtype = srl(instr, 12) & 0xf;
@@ -681,10 +663,14 @@ void do_instr(interp *I) {
                 // 0x0002 = HALT
                 I->flags |= WAIT_FLAG;
                 ok = 1;
+            } else if (rest == 0x28) {
+                // 0x0028 = CLC
+                // (clear carry flag)
+                I->flags &= ~CARRY_FLAG;
             } else if (rest == 0xaa) {
                 // 0x00aa = RETURN
                 // pops return address off stack and jumps to it
-                u16 retaddr = load_word(I, I->sp);
+                u16 retaddr = load_word(I, I->sp, I->dbr);
                 I->sp += 2;
                 I->pc = retaddr;
                 // don't increase pc
@@ -693,7 +679,7 @@ void do_instr(interp *I) {
             } else if (rest == 0xab) {
                 // 0x00ab = RETI
                 // return and enable interrupts
-                u16 retaddr = load_word(I, I->sp);
+                u16 retaddr = load_word(I, I->sp, I->dbr);
                 I->sp += 2;
                 I->pc = retaddr;
                 I->flags |= INTERRUPT_ENABLE_NEXT;
@@ -724,7 +710,7 @@ void do_instr(interp *I) {
             // xxxx = register to pop into
             u8 reg_idx = srl(rest, 4);
             u16 *pop_reg = get_reg(I, reg_idx);
-            *pop_reg = load_word(I, I->sp);
+            *pop_reg = load_word(I, I->sp, I->dbr);
             I->sp += 2;
             ok = 1;
         } else if (subcode == 3) {
@@ -790,7 +776,7 @@ void do_instr(interp *I) {
             // the instruction; we use this as the second operand
 
             // Get the immediate value
-            srcval = load_word(I, I->pc + 2);
+            srcval = load_word(I, I->pc + 2, I->pbr);
             pc_increment += 2;
         } else if (src_idx == 0x21) {
             // yy yyyy = 10 0001
@@ -1004,7 +990,7 @@ void do_instr(interp *I) {
                 I->pc += soffset * 2;
             } else {
                 // absolute jump
-                u16 new_addr = load_word(I, I->pc + 2);
+                u16 new_addr = load_word(I, I->pc + 2, I->pbr);
                 I->pc = new_addr;
             }
 
@@ -1039,11 +1025,11 @@ void do_instr(interp *I) {
         } else if (mem_id < 0x20) {
             // yy yyyy = 01 rrrr; address in rrrr + imm. offset following
             addr = *get_reg(I, mem_id & 0xf);
-            addr += load_word(I, I->pc + 2);
+            addr += load_word(I, I->pc + 2, I->dbr);
             pc_increment += 2;
         } else if (mem_id == 0x20) {
             // yy yyyy = 10 0000; no register, immediate address following
-            addr = load_word(I, I->pc + 2);
+            addr = load_word(I, I->pc + 2, I->dbr);
             pc_increment += 2;
         } else {
             fprintf(stderr, "Unknown address mode $%X for load/store "
@@ -1054,11 +1040,11 @@ void do_instr(interp *I) {
 
         if (op == 0) {
             // Load word
-            *reg = load_word(I, addr);
+            *reg = load_word(I, addr, I->dbr);
             //printf("Load word at $%04X: $%04X\n", addr, *reg);
         } else if (op == 1) {
             // Load byte
-            *reg = load_byte(I, addr);
+            *reg = load_byte(I, addr, I->dbr);
             //printf("Load byte at $%04X: $%02X\n", addr, *reg);
         } else if (op == 2) {
             // Store word
@@ -1091,7 +1077,7 @@ void do_instr(interp *I) {
         printf("Reg: a: %04X b: %04X c: %04X d: %04X\n", I->a, I->b, I->c, I->d);
         printf("     e: %04X f: %04X g: %04X h: %04X\n", I->e, I->f, I->g, I->h);
         printf("     i: %04X j: %04X k: %04X l: %04X\n", I->i, I->j, I->k, I->l);
-        printf("     m: %04X n: %04X SP %04X PC %04X\n", I->m, I->n, I->sp, I->pc);
+        printf("     m: %04X n: %04X SP %04X PC %04X\n", I->dbr, I->pbr, I->sp, I->pc);
     }*/
 }
 
@@ -1129,7 +1115,7 @@ int init_draw() {
         return 0;
     }
 
-    window = SDL_CreateWindow("seagull-16",
+    window = SDL_CreateWindow("cricket",
                               SDL_WINDOWPOS_UNDEFINED,
                               SDL_WINDOWPOS_UNDEFINED,
                               SCRW * SCALE, SCRH * SCALE,
@@ -1587,7 +1573,7 @@ void init_ppu(ppu *p) {
 
     p->pattern_offset = 0x00;
 
-    for (int i = 0; i < 0x10000; i++) {
+    for (int i = 0; i < 0x4000; i++) {
         p->pattern_table[i] = 0x00;
     }
 }

@@ -11,7 +11,7 @@ if len(sys.argv) < 2:
 if '-t' in sys.argv:
     # '-t' for text mode
     binmode = False
-    sys.argv = [x for x in sys.argv if x != '-b']
+    sys.argv = [x for x in sys.argv if x != '-t']
 else:
     binmode = True
 
@@ -36,7 +36,7 @@ if not binmode:
         for ix in range(16):
             print("sprite"+("%1X"%iy)+("%1X"%ix)+":", file=out)
             for y in range(8):
-                print("    data ", end='', file=out)
+                print("    hex ", end='', file=out)
                 for x in range(8):
                     print("%1X" % img.getpixel((ix * 8 + x, iy * 8 + y)), end='', file=out)
                 print('', file=out)
